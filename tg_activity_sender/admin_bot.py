@@ -215,6 +215,22 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
             return
         folder = message.text.strip()
         await state.update_data(source_folder=None if folder == "-" else folder)
+        await state.set_state(CampaignStates.waiting_activity_mode)
+        await message.answer(
+            "Как отбирать чаты?\n"
+            "1 - где было общение за последние N дней\n"
+            "2 - где не было общения больше N дней"
+        )
+
+    @router.message(CampaignStates.waiting_activity_mode)
+    async def campaign_activity_mode(message: Message, state: FSMContext) -> None:
+        if not await guard(message):
+            return
+        raw = message.text.strip()
+        if raw not in {"1", "2"}:
+            await message.answer("Отправь 1 или 2.")
+            return
+        await state.update_data(activity_mode=ActivityMode.ACTIVE if raw == "1" else ActivityMode.INACTIVE)
         await state.set_state(CampaignStates.waiting_days)
         await message.answer("Сколько дней порог активности? Например: 10")
 
@@ -240,7 +256,7 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
             chat_sequence_id=int(data["chat_sequence_id"]),
             private_sequence_id=int(data["private_sequence_id"]),
             source_folder=data.get("source_folder"),
-            activity_mode=ActivityMode.INACTIVE,
+            activity_mode=data["activity_mode"],
             days_threshold=int(data["days"]),
             include_chats=True,
             include_private=True,
