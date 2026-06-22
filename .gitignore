@@ -1,6 +1,9 @@
 .ssh/
+__pycache__/
+.pytest_cache/
 .env
 .env.*
+.venv/
 *.session
 *.session-journal
 sessions/

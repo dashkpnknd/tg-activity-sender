@@ -1,0 +1,19 @@
+[project]
+name = "tg-activity-sender"
+version = "0.1.0"
+description = "Telegram-administered activity-based campaign sender"
+requires-python = ">=3.11"
+dependencies = [
+    "aiogram>=3.7,<4",
+    "telethon>=1.36,<2",
+    "SQLAlchemy>=2.0,<3",
+    "python-dotenv>=1.0,<2",
+    "qrcode[pil]>=7.4,<8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

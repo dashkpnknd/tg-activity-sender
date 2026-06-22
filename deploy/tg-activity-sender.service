@@ -1,0 +1,15 @@
+[Unit]
+Description=TG Activity Sender
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/tg-activity-sender
+EnvironmentFile=/opt/tg-activity-sender/.env
+ExecStart=/opt/tg-activity-sender/.venv/bin/python -m tg_activity_sender.app
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+
