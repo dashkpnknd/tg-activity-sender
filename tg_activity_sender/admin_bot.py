@@ -14,7 +14,7 @@ from tg_activity_sender.core import ActivityMode, CampaignStatus
 from tg_activity_sender.db import Database
 from tg_activity_sender.keyboards import accounts_menu, back, campaigns_menu, main_menu, sequences_menu
 from tg_activity_sender.states import BlacklistStates, CampaignStates, SequenceStates
-from tg_activity_sender.telegram_accounts import AccountManager
+from tg_activity_sender.telegram_accounts import AccountManager, DeliveryClient
 
 
 def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids: frozenset[int], media_dir: Path) -> Dispatcher:
@@ -67,6 +67,28 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
                 lines.append(f"• <code>{account.telegram_id}</code> @{title}")
             text = "\n".join(lines)
         await callback.message.edit_text(text, reply_markup=back("accounts"), parse_mode=ParseMode.HTML)
+
+    @router.callback_query(F.data == "account:folders")
+    async def list_folders(callback: CallbackQuery) -> None:
+        if not await guard(callback):
+            return
+        accounts = db.list_accounts()
+        if not accounts:
+            await callback.answer("Сначала добавь аккаунт.", show_alert=True)
+            return
+        await callback.message.edit_text("Читаю папки первого подключенного аккаунта...")
+        client = await account_manager.client_for(accounts[0].session_path)
+        try:
+            folders = await DeliveryClient(client).list_folders()
+        finally:
+            await client.disconnect()
+        if not folders:
+            text = "Папки не найдены или Telegram не отдал список. В кампании можно указать '-' для всех групп."
+        else:
+            text = "<b>Папки аккаунта</b>\n" + "\n".join(
+                f"• <code>{folder_id}</code> — {title}" for folder_id, title in folders
+            )
+        await callback.message.answer(text, reply_markup=back("accounts"), parse_mode=ParseMode.HTML)
 
     @router.callback_query(F.data == "account:add_qr")
     async def add_account_qr(callback: CallbackQuery) -> None:
@@ -149,7 +171,6 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
         if not sequences:
             await callback.answer("Сначала создай цепочку сообщений.", show_alert=True)
             return
-        await state.update_data(sequence_id=sequences[0].id)
         await state.set_state(CampaignStates.waiting_name)
         await callback.message.edit_text("Напиши название кампании.", reply_markup=back("campaigns"))
 
@@ -158,6 +179,42 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
         if not await guard(message):
             return
         await state.update_data(name=message.text.strip())
+        sequences = db.list_sequences()
+        text = "<b>Цепочки</b>\n" + "\n".join(f"#{item.id} {item.name}" for item in sequences)
+        await state.set_state(CampaignStates.waiting_chat_sequence)
+        await message.answer(f"{text}\n\nВведи ID цепочки, которая уйдет в сам чат.", parse_mode=ParseMode.HTML)
+
+    @router.message(CampaignStates.waiting_chat_sequence)
+    async def campaign_chat_sequence(message: Message, state: FSMContext) -> None:
+        if not await guard(message):
+            return
+        if not message.text.isdigit():
+            await message.answer("Нужен ID цепочки числом.")
+            return
+        await state.update_data(chat_sequence_id=int(message.text))
+        await state.set_state(CampaignStates.waiting_private_sequence)
+        await message.answer("Теперь введи ID цепочки, которая уйдет в ЛС участникам беседы.")
+
+    @router.message(CampaignStates.waiting_private_sequence)
+    async def campaign_private_sequence(message: Message, state: FSMContext) -> None:
+        if not await guard(message):
+            return
+        if not message.text.isdigit():
+            await message.answer("Нужен ID цепочки числом.")
+            return
+        await state.update_data(private_sequence_id=int(message.text))
+        await state.set_state(CampaignStates.waiting_folder)
+        await message.answer(
+            "Введи папку чатов: точное название или ID из раздела «Аккаунты -> Папки чатов».\n"
+            "Если нужно пройтись по всем групповым чатам, отправь -."
+        )
+
+    @router.message(CampaignStates.waiting_folder)
+    async def campaign_folder(message: Message, state: FSMContext) -> None:
+        if not await guard(message):
+            return
+        folder = message.text.strip()
+        await state.update_data(source_folder=None if folder == "-" else folder)
         await state.set_state(CampaignStates.waiting_days)
         await message.answer("Сколько дней порог активности? Например: 10")
 
@@ -179,7 +236,10 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
         data = await state.get_data()
         campaign = db.create_campaign(
             name=data["name"],
-            sequence_id=int(data["sequence_id"]),
+            sequence_id=int(data["chat_sequence_id"]),
+            chat_sequence_id=int(data["chat_sequence_id"]),
+            private_sequence_id=int(data["private_sequence_id"]),
+            source_folder=data.get("source_folder"),
             activity_mode=ActivityMode.INACTIVE,
             days_threshold=int(data["days"]),
             include_chats=True,
@@ -189,7 +249,7 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
         )
         await state.clear()
         await message.answer(
-            f"Кампания #{campaign.id} создана. По умолчанию: неактивные диалоги, чаты + лички, пауза 5 минут."
+            f"Кампания #{campaign.id} создана: папка чатов -> сообщение в чат -> отдельное сообщение участникам."
         )
 
     @router.callback_query(F.data.in_({"campaign:list_all", "campaign:list_running"}))
@@ -205,7 +265,12 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
             lines = ["<b>Кампании</b>"]
             buttons = []
             for item in campaigns:
-                lines.append(f"• #{item.id} {item.name}: {item.status}")
+                lines.append(
+                    f"• #{item.id} {item.name}: {item.status}; "
+                    f"чат seq #{item.chat_sequence_id or item.sequence_id}, "
+                    f"ЛС seq #{item.private_sequence_id or item.sequence_id}, "
+                    f"папка: {item.source_folder or 'все группы'}"
+                )
                 buttons.append(
                     [
                         InlineKeyboardButton(text=f"▶ #{item.id}", callback_data=f"campaign:run:{item.id}"),

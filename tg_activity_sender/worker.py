@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from tg_activity_sender.core import ActivityMode, Blacklist, CampaignStatus, ScheduleWindow, select_recipients
+from tg_activity_sender.core import ActivityMode, Blacklist, CampaignStatus, Recipient, ScheduleWindow, select_recipients
 from tg_activity_sender.db import Database
 from tg_activity_sender.telegram_accounts import AccountManager, DeliveryClient
 
@@ -32,46 +32,100 @@ class CampaignWorker:
         for campaign in campaigns:
             if not ScheduleWindow.parse(campaign.schedule_window).contains(now):
                 continue
-            steps = self.db.get_sequence_steps(campaign.sequence_id)
-            if not steps or not accounts:
+            chat_steps = self.db.get_sequence_steps(campaign.chat_sequence_id or campaign.sequence_id)
+            private_steps = self.db.get_sequence_steps(campaign.private_sequence_id or campaign.sequence_id)
+            if not accounts:
                 continue
             for account in accounts:
                 client = await self.accounts.client_for(account.session_path)
                 try:
                     delivery = DeliveryClient(client)
-                    recipients = await delivery.scan_recipients()
-                    selected = select_recipients(
-                        recipients,
+                    chats = await delivery.scan_group_chats(campaign.source_folder)
+                    chat_recipients = [
+                        Recipient(
+                            id=chat.id,
+                            kind="chat",
+                            username=chat.username,
+                            days_since_last_message=chat.days_since_last_message,
+                        )
+                        for chat in chats
+                    ]
+                    selected_chats = select_recipients(
+                        chat_recipients,
                         mode=ActivityMode(campaign.activity_mode),
                         days_threshold=campaign.days_threshold,
-                        include_chats=campaign.include_chats,
-                        include_private=campaign.include_private,
+                        include_chats=True,
+                        include_private=False,
                         blacklist=blacklist,
                     )
-                    for recipient in selected:
-                        try:
-                            for step in steps:
-                                await delivery.send_payload(recipient.id, step.payload)
-                                if step.delay_after_seconds:
-                                    await asyncio.sleep(step.delay_after_seconds)
-                            self.db.create_delivery_log(
+                    for chat in selected_chats:
+                        if self.db.has_delivery_log(
+                            campaign_id=campaign.id,
+                            recipient_id=chat.id,
+                            recipient_kind="chat",
+                        ):
+                            continue
+                        if campaign.include_chats and chat_steps:
+                            await self._send_steps(
+                                delivery,
                                 campaign_id=campaign.id,
                                 account_telegram_id=account.telegram_id,
-                                recipient_id=recipient.id,
-                                recipient_kind=recipient.kind,
-                                status="sent",
-                                detail="ok",
+                                recipient=chat,
+                                steps=chat_steps,
+                                detail_prefix="chat",
                             )
-                        except Exception as exc:
-                            self.db.create_delivery_log(
-                                campaign_id=campaign.id,
-                                account_telegram_id=account.telegram_id,
-                                recipient_id=recipient.id,
-                                recipient_kind=recipient.kind,
-                                status="error",
-                                detail=str(exc)[:500],
-                            )
-                        await asyncio.sleep(campaign.delay_between_recipients_seconds)
+                            await asyncio.sleep(campaign.delay_between_recipients_seconds)
+                        if campaign.include_private and private_steps:
+                            async for participant in delivery.iter_chat_participants(chat.id):
+                                if blacklist.matches(participant):
+                                    continue
+                                if self.db.has_delivery_log(
+                                    campaign_id=campaign.id,
+                                    recipient_id=participant.id,
+                                    recipient_kind="private",
+                                ):
+                                    continue
+                                await self._send_steps(
+                                    delivery,
+                                    campaign_id=campaign.id,
+                                    account_telegram_id=account.telegram_id,
+                                    recipient=participant,
+                                    steps=private_steps,
+                                    detail_prefix=f"participant of chat {chat.id}",
+                                )
+                                await asyncio.sleep(campaign.delay_between_recipients_seconds)
                 finally:
                     await client.disconnect()
 
+    async def _send_steps(
+        self,
+        delivery: DeliveryClient,
+        *,
+        campaign_id: int,
+        account_telegram_id: int,
+        recipient: Recipient,
+        steps,
+        detail_prefix: str,
+    ) -> None:
+        try:
+            for step in steps:
+                await delivery.send_payload(recipient.id, step.payload)
+                if step.delay_after_seconds:
+                    await asyncio.sleep(step.delay_after_seconds)
+            self.db.create_delivery_log(
+                campaign_id=campaign_id,
+                account_telegram_id=account_telegram_id,
+                recipient_id=recipient.id,
+                recipient_kind=recipient.kind,
+                status="sent",
+                detail=detail_prefix,
+            )
+        except Exception as exc:
+            self.db.create_delivery_log(
+                campaign_id=campaign_id,
+                account_telegram_id=account_telegram_id,
+                recipient_id=recipient.id,
+                recipient_kind=recipient.kind,
+                status="error",
+                detail=f"{detail_prefix}: {str(exc)[:450]}",
+            )

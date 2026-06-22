@@ -20,6 +20,7 @@ def accounts_menu() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Добавить по QR", callback_data="account:add_qr")],
             [InlineKeyboardButton(text="Список аккаунтов", callback_data="account:list")],
+            [InlineKeyboardButton(text="Папки чатов", callback_data="account:folders")],
             [InlineKeyboardButton(text="Назад", callback_data="main")],
         ]
     )
@@ -50,4 +51,3 @@ def back(callback_data: str = "main") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="Назад", callback_data=callback_data)]]
     )
-

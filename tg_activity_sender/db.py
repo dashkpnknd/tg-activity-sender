@@ -11,6 +11,8 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    inspect,
+    text,
     select,
     update,
 )
@@ -63,10 +65,13 @@ class Campaign(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(255), unique=True)
     sequence_id: Mapped[int] = mapped_column(ForeignKey("message_sequences.id"))
+    chat_sequence_id: Mapped[int | None] = mapped_column(ForeignKey("message_sequences.id"), nullable=True)
+    private_sequence_id: Mapped[int | None] = mapped_column(ForeignKey("message_sequences.id"), nullable=True)
+    source_folder: Mapped[str | None] = mapped_column(String(255), nullable=True)
     activity_mode: Mapped[ActivityMode] = mapped_column(String(32))
     days_threshold: Mapped[int] = mapped_column(Integer)
-    include_chats: Mapped[bool] = mapped_column(Boolean)
-    include_private: Mapped[bool] = mapped_column(Boolean)
+    include_chats: Mapped[bool] = mapped_column(Boolean, default=True)
+    include_private: Mapped[bool] = mapped_column(Boolean, default=True)
     schedule_window: Mapped[str] = mapped_column(String(32))
     delay_between_recipients_seconds: Mapped[int] = mapped_column(Integer)
     status: Mapped[CampaignStatus] = mapped_column(String(32), default=CampaignStatus.DRAFT)
@@ -109,6 +114,23 @@ class Database:
     def init(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         Base.metadata.create_all(self.engine)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        inspector = inspect(self.engine)
+        if not inspector.has_table("campaigns"):
+            return
+        columns = {column["name"] for column in inspector.get_columns("campaigns")}
+        statements = []
+        if "chat_sequence_id" not in columns:
+            statements.append("ALTER TABLE campaigns ADD COLUMN chat_sequence_id INTEGER")
+        if "private_sequence_id" not in columns:
+            statements.append("ALTER TABLE campaigns ADD COLUMN private_sequence_id INTEGER")
+        if "source_folder" not in columns:
+            statements.append("ALTER TABLE campaigns ADD COLUMN source_folder VARCHAR(255)")
+        with self.engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
 
     def session(self) -> Session:
         return self.session_factory()
@@ -179,11 +201,17 @@ class Database:
         include_private: bool,
         schedule_window: str,
         delay_between_recipients_seconds: int,
+        chat_sequence_id: int | None = None,
+        private_sequence_id: int | None = None,
+        source_folder: str | None = None,
     ) -> Campaign:
         with self.session() as session:
             campaign = Campaign(
                 name=name,
                 sequence_id=sequence_id,
+                chat_sequence_id=chat_sequence_id or sequence_id,
+                private_sequence_id=private_sequence_id or sequence_id,
+                source_folder=source_folder,
                 activity_mode=activity_mode,
                 days_threshold=days_threshold,
                 include_chats=include_chats,
@@ -266,3 +294,15 @@ class Database:
         with self.session() as session:
             stmt = select(DeliveryLog).order_by(DeliveryLog.id.desc()).limit(limit)
             return list(session.scalars(stmt))
+
+    def has_delivery_log(self, *, campaign_id: int, recipient_id: int, recipient_kind: str, status: str = "sent") -> bool:
+        with self.session() as session:
+            stmt = (
+                select(DeliveryLog.id)
+                .where(DeliveryLog.campaign_id == campaign_id)
+                .where(DeliveryLog.recipient_id == recipient_id)
+                .where(DeliveryLog.recipient_kind == recipient_kind)
+                .where(DeliveryLog.status == status)
+                .limit(1)
+            )
+            return session.scalar(stmt) is not None
