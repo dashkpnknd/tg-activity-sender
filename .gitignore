@@ -1,0 +1,12 @@
+.ssh/
+.env
+.env.*
+*.session
+*.session-journal
+sessions/
+accounts/
+data/
+logs/
+*.db
+*.sqlite
+*.sqlite3
