@@ -29,6 +29,7 @@ def accounts_menu() -> InlineKeyboardMarkup:
 def campaigns_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="Шаблон localTraffic", callback_data="campaign:template_localtraffic")],
             [InlineKeyboardButton(text="Создать кампанию", callback_data="campaign:create")],
             [InlineKeyboardButton(text="Активные", callback_data="campaign:list_running")],
             [InlineKeyboardButton(text="Все кампании", callback_data="campaign:list_all")],

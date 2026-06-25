@@ -68,6 +68,11 @@ class Campaign(Base):
     chat_sequence_id: Mapped[int | None] = mapped_column(ForeignKey("message_sequences.id"), nullable=True)
     private_sequence_id: Mapped[int | None] = mapped_column(ForeignKey("message_sequences.id"), nullable=True)
     source_folder: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_account_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    target_segment: Mapped[str] = mapped_column(String(32), default="all")
+    team_identifiers: Mapped[list[str]] = mapped_column(JSON, default=list)
+    segment_window_days: Mapped[int] = mapped_column(Integer, default=30)
+    segment_min_non_team_messages: Mapped[int] = mapped_column(Integer, default=5)
     activity_mode: Mapped[ActivityMode] = mapped_column(String(32))
     days_threshold: Mapped[int] = mapped_column(Integer)
     include_chats: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -105,6 +110,10 @@ def normalize_blacklist_value(value: str | int) -> str:
     return raw.rstrip("/").split("/")[-1].removeprefix("@").lower()
 
 
+def normalize_username(value: str | None) -> str:
+    return (value or "").strip().rstrip("/").split("/")[-1].removeprefix("@").lower()
+
+
 class Database:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -128,6 +137,16 @@ class Database:
             statements.append("ALTER TABLE campaigns ADD COLUMN private_sequence_id INTEGER")
         if "source_folder" not in columns:
             statements.append("ALTER TABLE campaigns ADD COLUMN source_folder VARCHAR(255)")
+        if "source_account_username" not in columns:
+            statements.append("ALTER TABLE campaigns ADD COLUMN source_account_username VARCHAR(255)")
+        if "target_segment" not in columns:
+            statements.append("ALTER TABLE campaigns ADD COLUMN target_segment VARCHAR(32) DEFAULT 'all'")
+        if "team_identifiers" not in columns:
+            statements.append("ALTER TABLE campaigns ADD COLUMN team_identifiers JSON DEFAULT '[]'")
+        if "segment_window_days" not in columns:
+            statements.append("ALTER TABLE campaigns ADD COLUMN segment_window_days INTEGER DEFAULT 30")
+        if "segment_min_non_team_messages" not in columns:
+            statements.append("ALTER TABLE campaigns ADD COLUMN segment_min_non_team_messages INTEGER DEFAULT 5")
         with self.engine.begin() as connection:
             for statement in statements:
                 connection.execute(text(statement))
@@ -159,12 +178,24 @@ class Database:
         with self.session() as session:
             return list(session.scalars(select(Account).order_by(Account.id)))
 
+    def find_account_by_username(self, username: str) -> Account | None:
+        normalized = normalize_username(username)
+        with self.session() as session:
+            for account in session.scalars(select(Account)):
+                if normalize_username(account.username) == normalized:
+                    return account
+            return None
+
     def create_sequence(self, name: str) -> MessageSequence:
         with self.session() as session:
             sequence = MessageSequence(name=name)
             session.add(sequence)
             session.commit()
             return sequence
+
+    def find_sequence_by_name(self, name: str) -> MessageSequence | None:
+        with self.session() as session:
+            return session.scalar(select(MessageSequence).where(MessageSequence.name == name))
 
     def add_sequence_step(
         self,
@@ -204,6 +235,11 @@ class Database:
         chat_sequence_id: int | None = None,
         private_sequence_id: int | None = None,
         source_folder: str | None = None,
+        source_account_username: str | None = None,
+        target_segment: str = "all",
+        team_identifiers: list[str] | None = None,
+        segment_window_days: int = 30,
+        segment_min_non_team_messages: int = 5,
     ) -> Campaign:
         with self.session() as session:
             campaign = Campaign(
@@ -212,6 +248,11 @@ class Database:
                 chat_sequence_id=chat_sequence_id or sequence_id,
                 private_sequence_id=private_sequence_id or sequence_id,
                 source_folder=source_folder,
+                source_account_username=normalize_username(source_account_username) if source_account_username else None,
+                target_segment=target_segment,
+                team_identifiers=team_identifiers or [],
+                segment_window_days=segment_window_days,
+                segment_min_non_team_messages=segment_min_non_team_messages,
                 activity_mode=activity_mode,
                 days_threshold=days_threshold,
                 include_chats=include_chats,

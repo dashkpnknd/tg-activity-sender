@@ -5,7 +5,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from tg_activity_sender.core import ActivityMode, Blacklist, CampaignStatus, Recipient, ScheduleWindow, select_recipients
-from tg_activity_sender.db import Database
+from tg_activity_sender.db import Database, normalize_username
 from tg_activity_sender.telegram_accounts import AccountManager, DeliveryClient
 
 
@@ -28,10 +28,17 @@ class CampaignWorker:
         now = datetime.now(ZoneInfo(self.timezone))
         blacklist = Blacklist.from_entries(self.db.get_blacklist_values())
         campaigns = self.db.list_campaigns(CampaignStatus.RUNNING)
-        accounts = [account for account in self.db.list_accounts() if account.enabled]
         for campaign in campaigns:
             if not ScheduleWindow.parse(campaign.schedule_window).contains(now):
                 continue
+            accounts = [account for account in self.db.list_accounts() if account.enabled]
+            if campaign.source_account_username:
+                source_username = normalize_username(campaign.source_account_username)
+                accounts = [
+                    account
+                    for account in accounts
+                    if normalize_username(account.username) == source_username
+                ]
             chat_steps = self.db.get_sequence_steps(campaign.chat_sequence_id or campaign.sequence_id)
             private_steps = self.db.get_sequence_steps(campaign.private_sequence_id or campaign.sequence_id)
             if not accounts:
@@ -59,6 +66,15 @@ class CampaignWorker:
                         blacklist=blacklist,
                     )
                     for chat in selected_chats:
+                        non_team_messages = await delivery.count_recent_non_team_messages(
+                            chat.id,
+                            days=campaign.segment_window_days or 30,
+                            team_identifiers=campaign.team_identifiers or [],
+                        )
+                        if campaign.target_segment == "warm" and non_team_messages <= campaign.segment_min_non_team_messages:
+                            continue
+                        if campaign.target_segment == "cold" and non_team_messages > campaign.segment_min_non_team_messages:
+                            continue
                         if self.db.has_delivery_log(
                             campaign_id=campaign.id,
                             recipient_id=chat.id,
@@ -72,7 +88,7 @@ class CampaignWorker:
                                 account_telegram_id=account.telegram_id,
                                 recipient=chat,
                                 steps=chat_steps,
-                                detail_prefix="chat",
+                                detail_prefix=f"chat; non_team_30d={non_team_messages}",
                             )
                             await asyncio.sleep(campaign.delay_between_recipients_seconds)
                         if campaign.include_private and private_steps:
@@ -91,7 +107,7 @@ class CampaignWorker:
                                     account_telegram_id=account.telegram_id,
                                     recipient=participant,
                                     steps=private_steps,
-                                    detail_prefix=f"participant of chat {chat.id}",
+                                    detail_prefix=f"participant of chat {chat.id}; non_team_30d={non_team_messages}",
                                 )
                                 await asyncio.sleep(campaign.delay_between_recipients_seconds)
                 finally:

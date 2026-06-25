@@ -17,6 +17,30 @@ from tg_activity_sender.states import BlacklistStates, CampaignStates, SequenceS
 from tg_activity_sender.telegram_accounts import AccountManager, DeliveryClient
 
 
+LOCALTRAFFIC_CHAT_TEXT = (
+    "МЫ СОЗДАЛИ НЕЙРО-ПРОДАВЦА, который увеличит конверсию в продажу в 3 раза "
+    "и кратно сократит ваши расходы! 😋\n"
+    "- Бот работает в разы дешевле и эффективнее людей!\n"
+    "- Дожимает каждого лида до талого!\n"
+    "- Знает все актуальные цены и наличие!\n"
+    "...Вам актуально, чтобы бот заменил ваших менеджеров по продажам?"
+)
+
+LOCALTRAFFIC_PRIVATE_TEXT = (
+    "Доброго дня, пишу, тк мы подключаем всем магазинам, с кем работаем нейро-продавца\n\n"
+    "Он обрабатывает заявки в 3 раза лучше и быстрее менеджера\n\n"
+    "Ваш проект подключать?"
+)
+
+DEFAULT_TEAM_IDENTIFIERS = [
+    "Ксюша",
+    "Оксана",
+    "Даниил",
+    "localTraffic",
+    "local трафик",
+]
+
+
 def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids: frozenset[int], media_dir: Path) -> Dispatcher:
     router = Router()
 
@@ -163,6 +187,42 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
             return
         await callback.message.edit_text("Кампании", reply_markup=campaigns_menu())
 
+    @router.callback_query(F.data == "campaign:template_localtraffic")
+    async def template_localtraffic(callback: CallbackQuery) -> None:
+        if not await guard(callback):
+            return
+        if not db.find_account_by_username("localTraffic"):
+            await callback.answer("Сначала добавь аккаунт @localTraffic по QR.", show_alert=True)
+            return
+        chat_sequence = ensure_sequence_with_text(db, "localTraffic: чат cold", LOCALTRAFFIC_CHAT_TEXT)
+        private_sequence = ensure_sequence_with_text(db, "localTraffic: ЛС cold", LOCALTRAFFIC_PRIVATE_TEXT)
+        campaign = db.create_campaign(
+            name=f"localTraffic cold {uuid.uuid4().hex[:6]}",
+            sequence_id=chat_sequence.id,
+            chat_sequence_id=chat_sequence.id,
+            private_sequence_id=private_sequence.id,
+            source_folder="ВСЕ КЛИЕНТЫ",
+            source_account_username="localTraffic",
+            target_segment="cold",
+            team_identifiers=DEFAULT_TEAM_IDENTIFIERS,
+            segment_window_days=30,
+            segment_min_non_team_messages=5,
+            activity_mode=ActivityMode.BOTH,
+            days_threshold=9999,
+            include_chats=True,
+            include_private=True,
+            schedule_window="10:00-20:00",
+            delay_between_recipients_seconds=300,
+        )
+        await callback.message.edit_text(
+            "Шаблон создан.\n\n"
+            f"Кампания: #{campaign.id}\n"
+            f"Чатовая цепочка: #{chat_sequence.id}\n"
+            f"ЛС-цепочка: #{private_sequence.id}\n\n"
+            "Добавь кружок вторым шагом в обе цепочки, потом запускай кампанию из списка.",
+            reply_markup=back("campaigns"),
+        )
+
     @router.callback_query(F.data == "campaign:create")
     async def campaign_create_start(callback: CallbackQuery, state: FSMContext) -> None:
         if not await guard(callback):
@@ -285,7 +345,9 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
                     f"• #{item.id} {item.name}: {item.status}; "
                     f"чат seq #{item.chat_sequence_id or item.sequence_id}, "
                     f"ЛС seq #{item.private_sequence_id or item.sequence_id}, "
-                    f"папка: {item.source_folder or 'все группы'}"
+                    f"папка: {item.source_folder or 'все группы'}, "
+                    f"акк: @{item.source_account_username or 'любой'}, "
+                    f"сегмент: {item.target_segment}"
                 )
                 buttons.append(
                     [
@@ -388,3 +450,17 @@ async def capture_message_payload(message: Message, media_dir: Path) -> dict[str
     if not payload:
         raise ValueError("Не удалось сохранить сообщение")
     return payload
+
+
+def ensure_sequence_with_text(db: Database, name: str, text: str):
+    sequence = db.find_sequence_by_name(name)
+    if sequence is None:
+        sequence = db.create_sequence(name)
+    if not db.get_sequence_steps(sequence.id):
+        db.add_sequence_step(
+            sequence.id,
+            order=1,
+            payload={"text": text},
+            delay_after_seconds=0,
+        )
+    return sequence

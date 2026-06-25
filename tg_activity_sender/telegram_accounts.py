@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +12,7 @@ from telethon.errors import SessionPasswordNeededError
 from telethon.tl.custom import Dialog
 
 from tg_activity_sender.core import Recipient
-from tg_activity_sender.db import Database
+from tg_activity_sender.db import Database, normalize_username
 
 
 @dataclass
@@ -147,6 +147,45 @@ class DeliveryClient:
                 username=getattr(user, "username", None),
                 days_since_last_message=0,
             )
+
+    async def count_recent_non_team_messages(
+        self,
+        chat_id: int,
+        *,
+        days: int,
+        team_identifiers: list[str],
+    ) -> int:
+        cutoff = datetime.now().astimezone() - timedelta(days=days)
+        team = {normalize_username(item) for item in team_identifiers if item}
+        count = 0
+        async for message in self.client.iter_messages(chat_id, limit=500):
+            if not message.date:
+                continue
+            message_date = message.date.astimezone()
+            if message_date < cutoff:
+                break
+            if getattr(message, "out", False):
+                continue
+            sender = await message.get_sender()
+            if sender is None:
+                continue
+            sender_identifiers = {
+                str(getattr(sender, "id", "")),
+                normalize_username(getattr(sender, "username", None)),
+                normalize_username(getattr(sender, "first_name", None)),
+                normalize_username(" ".join(
+                    part
+                    for part in [
+                        getattr(sender, "first_name", None),
+                        getattr(sender, "last_name", None),
+                    ]
+                    if part
+                )),
+            }
+            if sender_identifiers & team:
+                continue
+            count += 1
+        return count
 
     async def send_payload(self, recipient_id: int, payload: dict[str, Any]) -> None:
         text = payload.get("text")
