@@ -486,6 +486,17 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
             )
         await callback.message.edit_text(text, reply_markup=back("main"), parse_mode=ParseMode.HTML)
 
+    @router.message()
+    async def unhandled_message(message: Message, state: FSMContext) -> None:
+        if not await guard(message):
+            return
+        current_state = await state.get_state()
+        if current_state is not None:
+            await message.answer("Я не смог обработать этот шаг. Нажми /start и начни этот раздел заново.")
+            await state.clear()
+            return
+        await message.answer("Я сейчас не жду текст. Нажми /start и выбери нужный раздел.")
+
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
     return dp
