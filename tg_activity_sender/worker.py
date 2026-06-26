@@ -151,7 +151,12 @@ class CampaignWorker:
                     )
                     private_recipients = []
                     if campaign.include_private and private_steps:
-                        private_recipients = await self._private_recipients_for_chat(delivery, campaign, chat)
+                        private_recipients = await self._private_recipients_for_chat(
+                            delivery,
+                            campaign,
+                            chat,
+                            account_telegram_id=account.telegram_id,
+                        )
 
                     if not chat_needs_send and not private_recipients:
                         continue
@@ -206,6 +211,7 @@ class CampaignWorker:
                 days_since_last_message=chat.days_since_last_message,
             )
             for chat in chats
+            if chat.id != self.notification_chat_id
         ]
         return select_recipients(
             chat_recipients,
@@ -216,10 +222,19 @@ class CampaignWorker:
             blacklist=self._current_blacklist(),
         )
 
-    async def _private_recipients_for_chat(self, delivery: DeliveryClient, campaign: Campaign, chat: Recipient) -> list[Recipient]:
+    async def _private_recipients_for_chat(
+        self,
+        delivery: DeliveryClient,
+        campaign: Campaign,
+        chat: Recipient,
+        *,
+        account_telegram_id: int,
+    ) -> list[Recipient]:
         recipients = []
         blacklist = self._current_blacklist()
         async for participant in delivery.iter_chat_participants(chat.id):
+            if participant.id == account_telegram_id:
+                continue
             if blacklist.matches(participant):
                 continue
             if self._is_team_recipient(participant, campaign.team_identifiers or []):

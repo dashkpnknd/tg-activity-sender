@@ -35,9 +35,11 @@ LOCALTRAFFIC_PRIVATE_TEXT = (
 
 DEFAULT_TEAM_IDENTIFIERS = [
     "Ксюша",
+    "Ksenia_LocalLead",
     "Оксана",
     "Даниил",
     "localTraffic",
+    "LocalTraffic",
     "local трафик",
 ]
 
@@ -424,6 +426,7 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
             include_private=True,
             schedule_window=data["schedule_window"],
             delay_between_recipients_seconds=300,
+            team_identifiers=DEFAULT_TEAM_IDENTIFIERS,
         )
         await state.clear()
         await message.answer(
