@@ -81,6 +81,21 @@ class CampaignWorker:
                             recipient_kind="chat",
                         ):
                             continue
+                        private_recipients = []
+                        if campaign.include_private and private_steps:
+                            async for participant in delivery.iter_chat_participants(chat.id):
+                                if blacklist.matches(participant):
+                                    continue
+                                if self._is_team_recipient(participant, campaign.team_identifiers or []):
+                                    continue
+                                if self.db.has_delivery_log(
+                                    campaign_id=campaign.id,
+                                    recipient_id=participant.id,
+                                    recipient_kind="private",
+                                ):
+                                    continue
+                                private_recipients.append(participant)
+                        mentions_text = self._mentions_text(private_recipients)
                         if campaign.include_chats and chat_steps:
                             await self._send_steps(
                                 delivery,
@@ -89,18 +104,11 @@ class CampaignWorker:
                                 recipient=chat,
                                 steps=chat_steps,
                                 detail_prefix=f"chat; non_team_30d={non_team_messages}",
+                                append_to_first_text=mentions_text,
                             )
                             await asyncio.sleep(campaign.delay_between_recipients_seconds)
                         if campaign.include_private and private_steps:
-                            async for participant in delivery.iter_chat_participants(chat.id):
-                                if blacklist.matches(participant):
-                                    continue
-                                if self.db.has_delivery_log(
-                                    campaign_id=campaign.id,
-                                    recipient_id=participant.id,
-                                    recipient_kind="private",
-                                ):
-                                    continue
+                            for participant in private_recipients:
                                 await self._send_steps(
                                     delivery,
                                     campaign_id=campaign.id,
@@ -122,10 +130,17 @@ class CampaignWorker:
         recipient: Recipient,
         steps,
         detail_prefix: str,
+        append_to_first_text: str = "",
     ) -> None:
         try:
+            appended = False
             for step in steps:
-                await delivery.send_payload(recipient.id, step.payload)
+                payload = step.payload
+                if append_to_first_text and not appended and payload.get("text"):
+                    payload = dict(payload)
+                    payload["text"] = f"{payload['text']}\n\n{append_to_first_text}"
+                    appended = True
+                await delivery.send_payload(recipient.id, payload)
                 if step.delay_after_seconds:
                     await asyncio.sleep(step.delay_after_seconds)
             self.db.create_delivery_log(
@@ -145,3 +160,25 @@ class CampaignWorker:
                 status="error",
                 detail=f"{detail_prefix}: {str(exc)[:450]}",
             )
+
+    def _mentions_text(self, recipients: list[Recipient]) -> str:
+        mentions = []
+        seen = set()
+        for recipient in recipients:
+            username = (recipient.username or "").strip().removeprefix("@")
+            if not username:
+                continue
+            normalized = normalize_username(username)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            mentions.append(f"@{username}")
+        return " ".join(mentions)
+
+    def _is_team_recipient(self, recipient: Recipient, team_identifiers: list[str]) -> bool:
+        identifiers = {
+            str(recipient.id),
+            normalize_username(recipient.username),
+        }
+        team = {normalize_username(item) for item in team_identifiers if item}
+        return bool(identifiers & team)
