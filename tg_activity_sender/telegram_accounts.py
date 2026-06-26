@@ -5,8 +5,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import qrcode
+import socks
 from telethon import TelegramClient, functions, utils
 from telethon.errors import SessionPasswordNeededError
 from telethon.tl.custom import Dialog
@@ -31,19 +33,28 @@ class ChatTarget:
 
 
 class AccountManager:
-    def __init__(self, db: Database, *, api_id: int, api_hash: str, session_dir: Path):
+    def __init__(
+        self,
+        db: Database,
+        *,
+        api_id: int,
+        api_hash: str,
+        session_dir: Path,
+        proxy_url: str | None = None,
+    ):
         self.db = db
         self.api_id = api_id
         self.api_hash = api_hash
         self.session_dir = session_dir
+        self.proxy = parse_proxy_url(proxy_url)
         self._pending: dict[str, tuple[TelegramClient, Any, Path]] = {}
 
     async def begin_qr_login(self, token: str) -> QrLoginTicket:
         self.session_dir.mkdir(parents=True, exist_ok=True)
         session_path = self.session_dir / f"pending_{token}"
-        client = TelegramClient(str(session_path), self.api_id, self.api_hash)
-        await client.connect()
-        qr_login = await client.qr_login()
+        client = TelegramClient(str(session_path), self.api_id, self.api_hash, proxy=self.proxy)
+        await asyncio.wait_for(client.connect(), timeout=30)
+        qr_login = await asyncio.wait_for(client.qr_login(), timeout=30)
         qr_png_path = self.session_dir / f"qr_{token}.png"
         qrcode.make(qr_login.url).save(qr_png_path)
         self._pending[token] = (client, qr_login, session_path)
@@ -73,7 +84,7 @@ class AccountManager:
                 await client.disconnect()
 
     async def client_for(self, session_path: str) -> TelegramClient:
-        client = TelegramClient(session_path, self.api_id, self.api_hash)
+        client = TelegramClient(session_path, self.api_id, self.api_hash, proxy=self.proxy)
         await client.start()
         return client
 
@@ -238,3 +249,25 @@ def _dialog_kind(dialog: Dialog) -> str:
     if getattr(entity, "broadcast", False):
         return "channel"
     return "chat"
+
+
+def parse_proxy_url(proxy_url: str | None):
+    if not proxy_url:
+        return None
+    parsed = urlparse(proxy_url)
+    scheme_map = {
+        "http": socks.HTTP,
+        "socks4": socks.SOCKS4,
+        "socks5": socks.SOCKS5,
+    }
+    proxy_type = scheme_map.get(parsed.scheme.lower())
+    if proxy_type is None or not parsed.hostname or not parsed.port:
+        raise ValueError("TELEGRAM_PROXY_URL must be http://user:pass@host:port, socks4://..., or socks5://...")
+    return (
+        proxy_type,
+        parsed.hostname,
+        parsed.port,
+        True,
+        parsed.username,
+        parsed.password,
+    )

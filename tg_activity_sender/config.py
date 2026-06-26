@@ -16,6 +16,7 @@ class Settings:
     database_path: Path
     media_dir: Path
     session_dir: Path
+    telegram_proxy_url: str | None
     timezone: str
     default_schedule_window: str
     default_delay_seconds: int
@@ -37,6 +38,7 @@ class Settings:
             database_path=Path(os.getenv("DATABASE_PATH", "data/bot.sqlite3")),
             media_dir=Path(os.getenv("MEDIA_DIR", "data/media")),
             session_dir=Path(os.getenv("SESSION_DIR", "sessions")),
+            telegram_proxy_url=os.getenv("TELEGRAM_PROXY_URL") or None,
             timezone=os.getenv("TIMEZONE", "Europe/Moscow"),
             default_schedule_window=os.getenv("DEFAULT_SCHEDULE_WINDOW", "10:00-20:00"),
             default_delay_seconds=int(os.getenv("DEFAULT_DELAY_SECONDS", "300")),
@@ -53,4 +55,3 @@ def _required(name: str) -> str:
     if not value:
         raise RuntimeError(f"Environment variable {name} is required")
     return value
-

@@ -120,7 +120,17 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
             return
         token = uuid.uuid4().hex
         await callback.message.edit_text("Создаю QR для входа...")
-        ticket = await account_manager.begin_qr_login(token)
+        try:
+            ticket = await account_manager.begin_qr_login(token)
+        except Exception as exc:
+            await callback.message.answer(
+                "Не удалось создать QR для входа.\n\n"
+                f"Ошибка: <code>{str(exc)[:800]}</code>\n\n"
+                "Чаще всего это значит, что сервер не может подключиться к Telegram напрямую; "
+                "я включил поддержку TELEGRAM_PROXY_URL.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
         await callback.message.answer_photo(
             FSInputFile(ticket.qr_png_path),
             caption=(

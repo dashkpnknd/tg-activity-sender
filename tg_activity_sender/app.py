@@ -27,6 +27,7 @@ async def main() -> None:
         api_id=settings.telegram_api_id,
         api_hash=settings.telegram_api_hash,
         session_dir=settings.session_dir,
+        proxy_url=settings.telegram_proxy_url,
     )
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dispatcher = build_dispatcher(
@@ -47,4 +48,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-

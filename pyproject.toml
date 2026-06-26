@@ -9,6 +9,7 @@ dependencies = [
     "SQLAlchemy>=2.0,<3",
     "python-dotenv>=1.0,<2",
     "qrcode[pil]>=7.4,<8",
+    "PySocks>=1.7,<2",
 ]
 
 [project.optional-dependencies]
@@ -16,4 +17,3 @@ dev = ["pytest>=8"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
