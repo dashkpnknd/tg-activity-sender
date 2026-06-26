@@ -16,6 +16,7 @@ from sqlalchemy import (
     select,
     update,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 from tg_activity_sender.core import ActivityMode, CampaignStatus
@@ -112,6 +113,15 @@ def normalize_blacklist_value(value: str | int) -> str:
 
 def normalize_username(value: str | None) -> str:
     return (value or "").strip().rstrip("/").split("/")[-1].removeprefix("@").lower()
+
+
+def display_blacklist_value(value: str) -> str:
+    normalized = normalize_blacklist_value(value)
+    if not normalized:
+        return value
+    if normalized.lstrip("-").isdigit():
+        return normalized
+    return f"@{normalized}"
 
 
 class Database:
@@ -273,8 +283,17 @@ class Database:
                 reason=reason,
             )
             session.add(entry)
-            session.commit()
-            return entry
+            try:
+                session.commit()
+                return entry
+            except IntegrityError:
+                session.rollback()
+                existing = session.scalar(
+                    select(BlacklistEntry).where(BlacklistEntry.normalized_value == normalize_blacklist_value(value))
+                )
+                if existing is None:
+                    raise
+                return existing
 
     def list_blacklist_entries(self) -> list[BlacklistEntry]:
         with self.session() as session:
@@ -329,7 +348,15 @@ class Database:
             session.commit()
 
     def get_blacklist_values(self) -> list[str]:
-        return [entry.normalized_value for entry in self.list_blacklist_entries()]
+        values = []
+        seen = set()
+        for entry in self.list_blacklist_entries():
+            normalized = normalize_blacklist_value(entry.normalized_value)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            values.append(normalized)
+        return values
 
     def recent_delivery_logs(self, limit: int = 20) -> list[DeliveryLog]:
         with self.session() as session:

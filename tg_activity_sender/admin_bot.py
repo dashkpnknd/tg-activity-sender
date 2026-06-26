@@ -12,7 +12,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from tg_activity_sender.core import ActivityMode, CampaignStatus
-from tg_activity_sender.db import Database
+from tg_activity_sender.db import Database, display_blacklist_value
 from tg_activity_sender.keyboards import accounts_menu, back, campaigns_menu, main_menu, sequences_menu
 from tg_activity_sender.states import AccountStates, BlacklistStates, CampaignStates, SequenceStates
 from tg_activity_sender.telegram_accounts import AccountManager, DeliveryClient, TwoFactorPasswordRequired
@@ -458,10 +458,7 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
         if not await guard(callback):
             return
         await state.set_state(BlacklistStates.waiting_entry)
-        values = db.get_blacklist_values()
-        text = "Пришли username, ID или ссылку t.me для ЧС."
-        if values:
-            text += "\n\nСейчас в ЧС:\n" + "\n".join(f"• {item}" for item in values[:30])
+        text = blacklist_text(db)
         await callback.message.edit_text(text, reply_markup=back("main"))
 
     @router.message(BlacklistStates.waiting_entry)
@@ -469,8 +466,8 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
         if not await guard(message):
             return
         db.add_blacklist_entry(value=message.text.strip(), reason="manual")
-        await state.clear()
-        await message.answer("Добавлено в ЧС.", reply_markup=main_menu())
+        await state.set_state(BlacklistStates.waiting_entry)
+        await message.answer(blacklist_text(db, prefix="Добавлено в ЧС."), reply_markup=back("main"))
 
     @router.callback_query(F.data == "logs")
     async def logs(callback: CallbackQuery) -> None:
@@ -543,3 +540,14 @@ def ensure_sequence_with_text(db: Database, name: str, text: str):
             delay_after_seconds=0,
         )
     return sequence
+
+
+def blacklist_text(db: Database, *, prefix: str = "") -> str:
+    values = db.get_blacklist_values()
+    text = "Пришли username, ID или ссылку t.me для ЧС."
+    if prefix:
+        text = f"{prefix}\n\n{text}"
+    if values:
+        formatted = [display_blacklist_value(item) for item in values[:30]]
+        text += "\n\nСейчас в ЧС:\n" + "\n".join(f"• {item}" for item in formatted)
+    return text
