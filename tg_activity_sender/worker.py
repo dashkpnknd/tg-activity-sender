@@ -69,7 +69,7 @@ class CampaignWorker:
             if campaign_id not in runnable_ids:
                 task.cancel()
                 self._campaign_tasks.pop(campaign_id, None)
-                await self._notify(f"Кампания #{campaign_id} остановлена воркером: пауза, стоп или вне расписания")
+                await self._notify(await self._campaign_stop_text(campaign_id))
 
         for campaign in running_campaigns:
             if campaign.id in self._campaign_tasks:
@@ -77,7 +77,11 @@ class CampaignWorker:
             if campaign.id not in runnable_ids:
                 continue
             self._campaign_tasks[campaign.id] = asyncio.create_task(self._run_campaign(campaign.id))
-            await self._notify(f"Кампания #{campaign.id} запущена воркером")
+            await self._notify(
+                f"Бот начал работу по расписанию\n"
+                f"Кампания: #{campaign.id} {campaign.name}\n"
+                f"Интервал: {campaign.schedule_window}"
+            )
 
     async def _cancel_all_campaign_tasks(self) -> None:
         tasks = list(self._campaign_tasks.values())
@@ -92,8 +96,14 @@ class CampaignWorker:
             while not self._stopped.is_set():
                 campaign = self.db.get_campaign(campaign_id)
                 if campaign is None or campaign.status != CampaignStatus.RUNNING:
+                    await self._notify(await self._campaign_stop_text(campaign_id))
                     break
                 if not self._campaign_in_schedule(campaign):
+                    await self._notify(
+                        f"Бот закончил работу по расписанию\n"
+                        f"Кампания: #{campaign.id} {campaign.name}\n"
+                        f"Интервал: {campaign.schedule_window}"
+                    )
                     break
                 did_work = await self._process_one_chat(campaign)
                 if not did_work:
@@ -348,8 +358,14 @@ class CampaignWorker:
     async def _ensure_running(self, campaign_id: int) -> None:
         campaign = self.db.get_campaign(campaign_id)
         if campaign is None or campaign.status != CampaignStatus.RUNNING:
+            await self._notify(await self._campaign_stop_text(campaign_id))
             raise asyncio.CancelledError
         if not self._campaign_in_schedule(campaign):
+            await self._notify(
+                f"Бот закончил работу по расписанию\n"
+                f"Кампания: #{campaign.id} {campaign.name}\n"
+                f"Интервал: {campaign.schedule_window}"
+            )
             raise asyncio.CancelledError
 
     def _campaign_in_schedule(self, campaign: Campaign, now: datetime | None = None) -> bool:
@@ -358,6 +374,28 @@ class CampaignWorker:
 
     def _current_blacklist(self) -> Blacklist:
         return Blacklist.from_entries(self.db.get_blacklist_values())
+
+    async def _campaign_stop_text(self, campaign_id: int) -> str:
+        campaign = self.db.get_campaign(campaign_id)
+        if campaign is None:
+            return f"Бот остановил работу\nКампания: #{campaign_id}\nПричина: кампания не найдена"
+        if campaign.status == CampaignStatus.RUNNING and not self._campaign_in_schedule(campaign):
+            return (
+                f"Бот закончил работу по расписанию\n"
+                f"Кампания: #{campaign.id} {campaign.name}\n"
+                f"Интервал: {campaign.schedule_window}"
+            )
+        if campaign.status == CampaignStatus.PAUSED:
+            reason = "пауза"
+        elif campaign.status == CampaignStatus.STOPPED:
+            reason = "остановлена"
+        else:
+            reason = f"статус {campaign.status}"
+        return (
+            f"Бот остановил работу\n"
+            f"Кампания: #{campaign.id} {campaign.name}\n"
+            f"Причина: {reason}"
+        )
 
     def _mentions_text(self, recipients: list[Recipient]) -> str:
         mentions = []
