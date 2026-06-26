@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from pathlib import Path
 from typing import Any
@@ -164,7 +165,20 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
     async def create_sequence_name(message: Message, state: FSMContext) -> None:
         if not await guard(message):
             return
-        sequence = db.create_sequence(message.text.strip())
+        name = (message.text or "").strip()
+        if not name:
+            await message.answer("Название цепочки не должно быть пустым.")
+            return
+        try:
+            sequence = db.create_sequence(name)
+        except Exception as exc:
+            await message.answer(
+                "Не удалось создать цепочку. Возможно, такая цепочка уже есть.\n\n"
+                f"Ошибка: <code>{str(exc)[:500]}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            await state.clear()
+            return
         await state.update_data(sequence_id=sequence.id)
         await state.set_state(SequenceStates.waiting_step)
         await message.answer("Цепочка создана. Пришли первый шаг: текст, фото, видео, документ, голосовое или кружок.")
@@ -175,9 +189,20 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
             return
         data = await state.get_data()
         sequence_id = int(data["sequence_id"])
-        steps = db.get_sequence_steps(sequence_id)
-        payload = await capture_message_payload(message, media_dir)
-        db.add_sequence_step(sequence_id, order=len(steps) + 1, payload=payload, delay_after_seconds=0)
+        try:
+            steps = db.get_sequence_steps(sequence_id)
+            payload = await asyncio.wait_for(capture_message_payload(message, media_dir), timeout=90)
+            db.add_sequence_step(sequence_id, order=len(steps) + 1, payload=payload, delay_after_seconds=0)
+        except asyncio.TimeoutError:
+            await message.answer("Не удалось сохранить шаг: Telegram слишком долго отдавал файл/кружок. Попробуй отправить его ещё раз.")
+            return
+        except Exception as exc:
+            await message.answer(
+                "Не удалось сохранить шаг цепочки.\n\n"
+                f"Ошибка: <code>{str(exc)[:500]}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
         await message.answer("Шаг добавлен. Пришли следующий шаг или нажми /start, чтобы выйти в меню.")
 
     @router.callback_query(F.data == "sequence:list")
@@ -455,7 +480,7 @@ async def capture_message_payload(message: Message, media_dir: Path) -> dict[str
         if not file_id:
             continue
         destination = media_dir / f"{uuid.uuid4().hex}_{media_type}"
-        await message.bot.download(file_id, destination=destination)
+        await asyncio.wait_for(message.bot.download(file_id, destination=destination), timeout=60)
         payload.setdefault(media_type, []).append({"path": str(destination), "file_name": destination.name})
     if not payload:
         raise ValueError("Не удалось сохранить сообщение")
