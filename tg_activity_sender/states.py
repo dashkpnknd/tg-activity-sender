@@ -6,6 +6,10 @@ class SequenceStates(StatesGroup):
     waiting_step = State()
 
 
+class AccountStates(StatesGroup):
+    waiting_2fa_password = State()
+
+
 class CampaignStates(StatesGroup):
     waiting_name = State()
     waiting_chat_sequence = State()

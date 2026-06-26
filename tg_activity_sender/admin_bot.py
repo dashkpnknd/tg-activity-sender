@@ -14,8 +14,8 @@ from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, Inli
 from tg_activity_sender.core import ActivityMode, CampaignStatus
 from tg_activity_sender.db import Database
 from tg_activity_sender.keyboards import accounts_menu, back, campaigns_menu, main_menu, sequences_menu
-from tg_activity_sender.states import BlacklistStates, CampaignStates, SequenceStates
-from tg_activity_sender.telegram_accounts import AccountManager, DeliveryClient
+from tg_activity_sender.states import AccountStates, BlacklistStates, CampaignStates, SequenceStates
+from tg_activity_sender.telegram_accounts import AccountManager, DeliveryClient, TwoFactorPasswordRequired
 
 
 LOCALTRAFFIC_CHAT_TEXT = (
@@ -116,7 +116,7 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
         await callback.message.answer(text, reply_markup=back("accounts"), parse_mode=ParseMode.HTML)
 
     @router.callback_query(F.data == "account:add_qr")
-    async def add_account_qr(callback: CallbackQuery) -> None:
+    async def add_account_qr(callback: CallbackQuery, state: FSMContext) -> None:
         if not await guard(callback):
             return
         token = uuid.uuid4().hex
@@ -145,8 +145,41 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
         try:
             telegram_id = await account_manager.finish_qr_login(token)
             await callback.message.answer(f"Аккаунт <code>{telegram_id}</code> добавлен.", parse_mode=ParseMode.HTML)
+        except TwoFactorPasswordRequired:
+            await state.set_state(AccountStates.waiting_2fa_password)
+            await state.update_data(qr_token=token)
+            await callback.message.answer(
+                "QR принят, но на аккаунте включён облачный пароль Telegram.\n"
+                "Отправь 2FA-пароль следующим сообщением."
+            )
         except Exception as exc:
             await callback.message.answer(f"Не удалось добавить аккаунт: {exc}")
+
+    @router.message(AccountStates.waiting_2fa_password)
+    async def account_2fa_password(message: Message, state: FSMContext) -> None:
+        if not await guard(message):
+            return
+        data = await state.get_data()
+        token = data.get("qr_token")
+        if not token:
+            await state.clear()
+            await message.answer("Не нашёл активную QR-авторизацию. Начни добавление аккаунта заново.")
+            return
+        try:
+            telegram_id = await account_manager.finish_2fa_login(token, message.text or "")
+        except Exception as exc:
+            await message.answer(
+                "Не удалось завершить вход с 2FA-паролем.\n\n"
+                f"Ошибка: <code>{str(exc)[:500]}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        await state.clear()
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await message.answer(f"Аккаунт <code>{telegram_id}</code> добавлен.", parse_mode=ParseMode.HTML)
 
     @router.callback_query(F.data == "sequences")
     async def show_sequences(callback: CallbackQuery) -> None:

@@ -24,6 +24,10 @@ class QrLoginTicket:
     qr_png_path: Path
 
 
+class TwoFactorPasswordRequired(Exception):
+    pass
+
+
 @dataclass(frozen=True)
 class ChatTarget:
     id: int
@@ -61,23 +65,38 @@ class AccountManager:
         return QrLoginTicket(token=token, url=qr_login.url, qr_png_path=qr_png_path)
 
     async def finish_qr_login(self, token: str, timeout_seconds: int = 120) -> int:
-        client, qr_login, session_path = self._pending.pop(token)
+        client, qr_login, session_path = self._pending[token]
         try:
-            try:
-                await asyncio.wait_for(qr_login.wait(), timeout=timeout_seconds)
-            except SessionPasswordNeededError as exc:
-                raise RuntimeError("На аккаунте включён 2FA-пароль; QR вошёл, но нужен пароль.") from exc
+            await asyncio.wait_for(qr_login.wait(), timeout=timeout_seconds)
+        except SessionPasswordNeededError as exc:
+            raise TwoFactorPasswordRequired from exc
+        except Exception:
+            self._pending.pop(token, None)
+            if client.is_connected():
+                await client.disconnect()
+            raise
+        return await self._save_authorized_client(token, client, session_path)
+
+    async def finish_2fa_login(self, token: str, password: str) -> int:
+        client, _, session_path = self._pending[token]
+        await asyncio.wait_for(client.sign_in(password=password), timeout=30)
+        return await self._save_authorized_client(token, client, session_path)
+
+    async def _save_authorized_client(self, token: str, client: TelegramClient, session_path: Path) -> int:
+        try:
             me = await client.get_me()
             final_session = self.session_dir / f"{me.id}"
-            await client.disconnect()
             if session_path.with_suffix(".session").exists():
                 session_path.with_suffix(".session").rename(final_session.with_suffix(".session"))
-            self.db.create_account(
-                telegram_id=me.id,
-                username=me.username,
-                display_name=" ".join(part for part in [me.first_name, me.last_name] if part),
-                session_path=str(final_session),
-            )
+            existing = self.db.find_account_by_username(me.username) if me.username else None
+            if not existing:
+                self.db.create_account(
+                    telegram_id=me.id,
+                    username=me.username,
+                    display_name=" ".join(part for part in [me.first_name, me.last_name] if part),
+                    session_path=str(final_session),
+                )
+            self._pending.pop(token, None)
             return me.id
         finally:
             if client.is_connected():
