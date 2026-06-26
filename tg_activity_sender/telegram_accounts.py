@@ -36,6 +36,12 @@ class ChatTarget:
     days_since_last_message: int
 
 
+@dataclass(frozen=True)
+class FolderPeerFilter:
+    include_peer_ids: set[int] | None
+    exclude_peer_ids: set[int]
+
+
 class AccountManager:
     def __init__(
         self,
@@ -146,13 +152,18 @@ class DeliveryClient:
 
     async def scan_group_chats(self, source_folder: str | None = None) -> list[ChatTarget]:
         folder = source_folder.strip().lower() if source_folder else None
-        folder_peer_ids = await self._folder_peer_ids(folder) if folder else None
+        folder_filter = await self._folder_peer_filter(folder) if folder else None
+        if folder and folder_filter is None:
+            return []
         chats: list[ChatTarget] = []
         async for dialog in self.client.iter_dialogs():
             if not _dialog_kind(dialog) == "chat":
                 continue
-            if folder_peer_ids is not None and dialog.id not in folder_peer_ids:
-                continue
+            if folder_filter is not None:
+                if folder_filter.include_peer_ids is not None and dialog.id not in folder_filter.include_peer_ids:
+                    continue
+                if dialog.id in folder_filter.exclude_peer_ids:
+                    continue
             top_message = getattr(dialog, "message", None)
             if not top_message or not getattr(top_message, "date", None):
                 continue
@@ -237,7 +248,7 @@ class DeliveryClient:
         if text:
             await self.client.send_message(recipient_id, text, parse_mode="html")
 
-    async def _folder_peer_ids(self, folder: str) -> set[int] | None:
+    async def _folder_peer_filter(self, folder: str) -> FolderPeerFilter | None:
         try:
             filters = await self.client(functions.messages.GetDialogFiltersRequest())
         except Exception:
@@ -251,13 +262,27 @@ class DeliveryClient:
                 break
         if matched_filter is None:
             return None
+        include_peers = getattr(matched_filter, "include_peers", []) or []
+        exclude_peers = getattr(matched_filter, "exclude_peers", []) or []
+        include_peer_ids = await self._peer_ids(include_peers) if include_peers else None
+        if include_peer_ids is None and not getattr(matched_filter, "groups", False):
+            include_peer_ids = set()
+        return FolderPeerFilter(
+            include_peer_ids=include_peer_ids,
+            exclude_peer_ids=await self._peer_ids(exclude_peers),
+        )
+
+    async def _peer_ids(self, peers) -> set[int]:
         peer_ids: set[int] = set()
-        for peer in getattr(matched_filter, "include_peers", []) or []:
+        for peer in peers:
             try:
                 entity = await self.client.get_entity(peer)
                 peer_ids.add(utils.get_peer_id(entity))
             except Exception:
-                continue
+                try:
+                    peer_ids.add(utils.get_peer_id(peer))
+                except Exception:
+                    continue
         return peer_ids
 
 
