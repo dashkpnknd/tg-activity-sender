@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -109,6 +110,18 @@ def normalize_blacklist_value(value: str | int) -> str:
     if raw.lstrip("-").isdigit():
         return raw
     return raw.rstrip("/").split("/")[-1].removeprefix("@").lower()
+
+
+def normalize_blacklist_values(value: str | int) -> list[str]:
+    raw = str(value).strip()
+    if not raw:
+        return []
+    values = []
+    for item in re.split(r"[\s,;]+", raw):
+        normalized = normalize_blacklist_value(item)
+        if normalized:
+            values.append(normalized)
+    return values
 
 
 def normalize_username(value: str | None) -> str:
@@ -276,10 +289,20 @@ class Database:
             return campaign
 
     def add_blacklist_entry(self, *, value: str | int, reason: str = "") -> BlacklistEntry:
+        normalized_values = normalize_blacklist_values(value)
+        if len(normalized_values) > 1:
+            first_entry = None
+            for item in normalized_values:
+                entry = self.add_blacklist_entry(value=item, reason=reason)
+                if first_entry is None:
+                    first_entry = entry
+            if first_entry is not None:
+                return first_entry
         with self.session() as session:
+            normalized_value = normalize_blacklist_value(value)
             entry = BlacklistEntry(
                 value=str(value).strip(),
-                normalized_value=normalize_blacklist_value(value),
+                normalized_value=normalized_value,
                 reason=reason,
             )
             session.add(entry)
@@ -289,7 +312,7 @@ class Database:
             except IntegrityError:
                 session.rollback()
                 existing = session.scalar(
-                    select(BlacklistEntry).where(BlacklistEntry.normalized_value == normalize_blacklist_value(value))
+                    select(BlacklistEntry).where(BlacklistEntry.normalized_value == normalized_value)
                 )
                 if existing is None:
                     raise
@@ -351,11 +374,11 @@ class Database:
         values = []
         seen = set()
         for entry in self.list_blacklist_entries():
-            normalized = normalize_blacklist_value(entry.normalized_value)
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            values.append(normalized)
+            for normalized in normalize_blacklist_values(entry.normalized_value):
+                if not normalized or normalized in seen:
+                    continue
+                seen.add(normalized)
+                values.append(normalized)
         return values
 
     def recent_delivery_logs(self, limit: int = 20) -> list[DeliveryLog]:
