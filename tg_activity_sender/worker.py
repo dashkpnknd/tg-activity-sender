@@ -9,10 +9,14 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot
 
 from tg_activity_sender.core import ActivityMode, Blacklist, CampaignStatus, Recipient, ScheduleWindow, select_recipients
-from tg_activity_sender.db import Database, normalize_username
+from tg_activity_sender.db import Campaign, Database, normalize_username
 from tg_activity_sender.telegram_accounts import AccountManager, DeliveryClient
 
 logger = logging.getLogger(__name__)
+
+POST_CHAT_PRIVATE_DELAY_SECONDS = 60
+IDLE_POLL_SECONDS = 20
+STATUS_POLL_SECONDS = 5
 
 
 class CampaignWorker:
@@ -31,133 +35,217 @@ class CampaignWorker:
         self.notification_bot = notification_bot
         self.notification_chat_id = notification_chat_id
         self._stopped = asyncio.Event()
+        self._campaign_tasks: dict[int, asyncio.Task] = {}
 
     async def run_forever(self) -> None:
-        while not self._stopped.is_set():
-            await self.run_once()
-            await asyncio.sleep(30)
+        try:
+            while not self._stopped.is_set():
+                await self._sync_campaign_tasks()
+                await asyncio.sleep(STATUS_POLL_SECONDS)
+        finally:
+            await self._cancel_all_campaign_tasks()
 
     def stop(self) -> None:
         self._stopped.set()
+        for task in self._campaign_tasks.values():
+            task.cancel()
 
     async def run_once(self) -> None:
+        await self._sync_campaign_tasks()
+
+    async def _sync_campaign_tasks(self) -> None:
         now = datetime.now(ZoneInfo(self.timezone))
-        blacklist = Blacklist.from_entries(self.db.get_blacklist_values())
-        campaigns = self.db.list_campaigns(CampaignStatus.RUNNING)
-        for campaign in campaigns:
-            if not ScheduleWindow.parse(campaign.schedule_window).contains(now):
+        running_campaigns = self.db.list_campaigns(CampaignStatus.RUNNING)
+        runnable_ids = {
+            campaign.id
+            for campaign in running_campaigns
+            if self._campaign_in_schedule(campaign, now)
+        }
+
+        for campaign_id, task in list(self._campaign_tasks.items()):
+            if task.done():
+                self._campaign_tasks.pop(campaign_id, None)
                 continue
-            accounts = [account for account in self.db.list_accounts() if account.enabled]
-            if campaign.source_account_username:
-                source_username = normalize_username(campaign.source_account_username)
-                accounts = [
-                    account
-                    for account in accounts
-                    if normalize_username(account.username) == source_username
-                ]
-            chat_steps = self.db.get_sequence_steps(campaign.chat_sequence_id or campaign.sequence_id)
-            private_steps = self.db.get_sequence_steps(campaign.private_sequence_id or campaign.sequence_id)
-            if not accounts:
+            if campaign_id not in runnable_ids:
+                task.cancel()
+                self._campaign_tasks.pop(campaign_id, None)
+                await self._notify(f"Кампания #{campaign_id} остановлена воркером: пауза, стоп или вне расписания")
+
+        for campaign in running_campaigns:
+            if campaign.id in self._campaign_tasks:
                 continue
-            for account in accounts:
-                client = await self.accounts.client_for(account.session_path)
-                try:
-                    delivery = DeliveryClient(client)
-                    chats = await delivery.scan_group_chats(campaign.source_folder)
-                    await self._notify(
-                        f"Кампания #{campaign.id} {campaign.name}\n"
-                        f"Аккаунт: @{account.username or account.telegram_id}\n"
-                        f"Папка: {campaign.source_folder or 'все группы'}\n"
-                        f"Найдено чатов: {len(chats)}"
+            if campaign.id not in runnable_ids:
+                continue
+            self._campaign_tasks[campaign.id] = asyncio.create_task(self._run_campaign(campaign.id))
+            await self._notify(f"Кампания #{campaign.id} запущена воркером")
+
+    async def _cancel_all_campaign_tasks(self) -> None:
+        tasks = list(self._campaign_tasks.values())
+        self._campaign_tasks.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _run_campaign(self, campaign_id: int) -> None:
+        try:
+            while not self._stopped.is_set():
+                campaign = self.db.get_campaign(campaign_id)
+                if campaign is None or campaign.status != CampaignStatus.RUNNING:
+                    break
+                if not self._campaign_in_schedule(campaign):
+                    break
+                did_work = await self._process_one_chat(campaign)
+                if not did_work:
+                    await self._sleep_checked(IDLE_POLL_SECONDS, campaign_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Campaign worker crashed for campaign %s", campaign_id)
+            await self._notify(f"Ошибка воркера кампании #{campaign_id}. Подробности в логах сервера.")
+        finally:
+            self._campaign_tasks.pop(campaign_id, None)
+
+    async def _process_one_chat(self, campaign: Campaign) -> bool:
+        accounts = [account for account in self.db.list_accounts() if account.enabled]
+        if campaign.source_account_username:
+            source_username = normalize_username(campaign.source_account_username)
+            accounts = [account for account in accounts if normalize_username(account.username) == source_username]
+        if not accounts:
+            await self._notify(f"Кампания #{campaign.id}: нет включенного аккаунта @{campaign.source_account_username or 'любой'}")
+            return False
+
+        chat_steps = self.db.get_sequence_steps(campaign.chat_sequence_id or campaign.sequence_id)
+        private_steps = self.db.get_sequence_steps(campaign.private_sequence_id or campaign.sequence_id)
+        if not chat_steps and not private_steps:
+            await self._notify(f"Кампания #{campaign.id}: нет шагов для отправки")
+            return False
+
+        for account in accounts:
+            await self._ensure_running(campaign.id)
+            client = await self.accounts.client_for(account.session_path)
+            try:
+                delivery = DeliveryClient(client)
+                chats = await delivery.scan_group_chats(campaign.source_folder)
+                await self._notify(
+                    f"Кампания #{campaign.id} {campaign.name}\n"
+                    f"Аккаунт: @{account.username or account.telegram_id}\n"
+                    f"Папка: {campaign.source_folder or 'все группы'}\n"
+                    f"Найдено чатов: {len(chats)}"
+                )
+                selected_chats = self._select_chats(chats, campaign)
+                for chat in selected_chats:
+                    await self._ensure_running(campaign.id)
+                    non_team_messages = await delivery.count_recent_non_team_messages(
+                        chat.id,
+                        days=campaign.segment_window_days or 30,
+                        team_identifiers=campaign.team_identifiers or [],
                     )
-                    chat_recipients = [
-                        Recipient(
-                            id=chat.id,
-                            kind="chat",
-                            username=chat.username,
-                            days_since_last_message=chat.days_since_last_message,
-                        )
-                        for chat in chats
-                    ]
-                    selected_chats = select_recipients(
-                        chat_recipients,
-                        mode=ActivityMode(campaign.activity_mode),
-                        days_threshold=campaign.days_threshold,
-                        include_chats=True,
-                        include_private=False,
-                        blacklist=blacklist,
+                    if not self._matches_segment(campaign, non_team_messages):
+                        continue
+
+                    chat_needs_send = bool(campaign.include_chats and chat_steps) and not self._already_sent(
+                        campaign=campaign,
+                        recipient_id=chat.id,
+                        recipient_kind="chat",
                     )
-                    for chat in selected_chats:
-                        non_team_messages = await delivery.count_recent_non_team_messages(
-                            chat.id,
-                            days=campaign.segment_window_days or 30,
-                            team_identifiers=campaign.team_identifiers or [],
-                        )
-                        if campaign.target_segment == "warm" and non_team_messages <= campaign.segment_min_non_team_messages:
-                            continue
-                        if campaign.target_segment == "cold" and non_team_messages > campaign.segment_min_non_team_messages:
-                            continue
-                        if self.db.has_delivery_log(
+                    private_recipients = []
+                    if campaign.include_private and private_steps:
+                        private_recipients = await self._private_recipients_for_chat(delivery, campaign, chat)
+
+                    if not chat_needs_send and not private_recipients:
+                        continue
+
+                    mentions_text = self._mentions_text(private_recipients)
+                    if chat_needs_send:
+                        await self._send_steps(
+                            delivery,
                             campaign_id=campaign.id,
-                            recipient_id=chat.id,
-                            recipient_kind="chat",
-                        ):
-                            continue
-                        if self.db.has_delivery_for_key(
+                            account_telegram_id=account.telegram_id,
+                            account_label=account.username or str(account.telegram_id),
                             dedupe_key=campaign.dedupe_key,
-                            recipient_id=chat.id,
-                            recipient_kind="chat",
-                        ):
-                            continue
-                        private_recipients = []
-                        if campaign.include_private and private_steps:
-                            async for participant in delivery.iter_chat_participants(chat.id):
-                                if blacklist.matches(participant):
-                                    continue
-                                if self._is_team_recipient(participant, campaign.team_identifiers or []):
-                                    continue
-                                if self.db.has_delivery_log(
-                                    campaign_id=campaign.id,
-                                    recipient_id=participant.id,
-                                    recipient_kind="private",
-                                ):
-                                    continue
-                                if self.db.has_delivery_for_key(
-                                    dedupe_key=campaign.dedupe_key,
-                                    recipient_id=participant.id,
-                                    recipient_kind="private",
-                                ):
-                                    continue
-                                private_recipients.append(participant)
-                        mentions_text = self._mentions_text(private_recipients)
-                        if campaign.include_chats and chat_steps:
+                            recipient=chat,
+                            steps=chat_steps,
+                            detail_prefix=f"chat; non_team_30d={non_team_messages}",
+                            append_to_first_text=mentions_text,
+                        )
+                    if private_recipients:
+                        await self._sleep_checked(POST_CHAT_PRIVATE_DELAY_SECONDS, campaign.id)
+                        for participant in private_recipients:
+                            await self._ensure_running(campaign.id)
+                            if self._current_blacklist().matches(participant):
+                                continue
+                            if self._already_sent(
+                                campaign=campaign,
+                                recipient_id=participant.id,
+                                recipient_kind="private",
+                            ):
+                                continue
                             await self._send_steps(
                                 delivery,
                                 campaign_id=campaign.id,
                                 account_telegram_id=account.telegram_id,
                                 account_label=account.username or str(account.telegram_id),
                                 dedupe_key=campaign.dedupe_key,
-                                recipient=chat,
-                                steps=chat_steps,
-                                detail_prefix=f"chat; non_team_30d={non_team_messages}",
-                                append_to_first_text=mentions_text,
+                                recipient=participant,
+                                steps=private_steps,
+                                detail_prefix=f"participant of chat {chat.id}; non_team_30d={non_team_messages}",
                             )
-                            await asyncio.sleep(campaign.delay_between_recipients_seconds)
-                        if campaign.include_private and private_steps:
-                            for participant in private_recipients:
-                                await self._send_steps(
-                                    delivery,
-                                    campaign_id=campaign.id,
-                                    account_telegram_id=account.telegram_id,
-                                    account_label=account.username or str(account.telegram_id),
-                                    dedupe_key=campaign.dedupe_key,
-                                    recipient=participant,
-                                    steps=private_steps,
-                                    detail_prefix=f"participant of chat {chat.id}; non_team_30d={non_team_messages}",
-                                )
-                                await asyncio.sleep(campaign.delay_between_recipients_seconds)
-                finally:
-                    await client.disconnect()
+                    await self._sleep_checked(campaign.delay_between_recipients_seconds, campaign.id)
+                    return True
+            finally:
+                await client.disconnect()
+        return False
+
+    def _select_chats(self, chats, campaign: Campaign) -> list[Recipient]:
+        chat_recipients = [
+            Recipient(
+                id=chat.id,
+                kind="chat",
+                username=chat.username,
+                days_since_last_message=chat.days_since_last_message,
+            )
+            for chat in chats
+        ]
+        return select_recipients(
+            chat_recipients,
+            mode=ActivityMode(campaign.activity_mode),
+            days_threshold=campaign.days_threshold,
+            include_chats=True,
+            include_private=False,
+            blacklist=self._current_blacklist(),
+        )
+
+    async def _private_recipients_for_chat(self, delivery: DeliveryClient, campaign: Campaign, chat: Recipient) -> list[Recipient]:
+        recipients = []
+        blacklist = self._current_blacklist()
+        async for participant in delivery.iter_chat_participants(chat.id):
+            if blacklist.matches(participant):
+                continue
+            if self._is_team_recipient(participant, campaign.team_identifiers or []):
+                continue
+            if self._already_sent(campaign=campaign, recipient_id=participant.id, recipient_kind="private"):
+                continue
+            recipients.append(participant)
+        return recipients
+
+    def _matches_segment(self, campaign: Campaign, non_team_messages: int) -> bool:
+        if campaign.target_segment == "warm" and non_team_messages <= campaign.segment_min_non_team_messages:
+            return False
+        if campaign.target_segment == "cold" and non_team_messages > campaign.segment_min_non_team_messages:
+            return False
+        return True
+
+    def _already_sent(self, *, campaign: Campaign, recipient_id: int, recipient_kind: str) -> bool:
+        return self.db.has_delivery_log(
+            campaign_id=campaign.id,
+            recipient_id=recipient_id,
+            recipient_kind=recipient_kind,
+        ) or self.db.has_delivery_for_key(
+            dedupe_key=campaign.dedupe_key,
+            recipient_id=recipient_id,
+            recipient_kind=recipient_kind,
+        )
 
     async def _send_steps(
         self,
@@ -175,6 +263,7 @@ class CampaignWorker:
         try:
             appended = False
             for step in steps:
+                await self._ensure_running(campaign_id)
                 payload = step.payload
                 if append_to_first_text and not appended and payload.get("text"):
                     payload = dict(payload)
@@ -189,7 +278,7 @@ class CampaignWorker:
                 )
                 await delivery.send_payload(recipient.id, payload)
                 if step.delay_after_seconds:
-                    await asyncio.sleep(step.delay_after_seconds)
+                    await self._sleep_checked(step.delay_after_seconds, campaign_id)
             await self._notify(
                 f"Отправлено\n"
                 f"Кампания: #{campaign_id}\n"
@@ -205,6 +294,8 @@ class CampaignWorker:
                 detail=detail_prefix,
                 dedupe_key=dedupe_key,
             )
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             await self._notify(
                 f"Ошибка отправки\n"
@@ -222,6 +313,28 @@ class CampaignWorker:
                 detail=f"{detail_prefix}: {str(exc)[:450]}",
                 dedupe_key=dedupe_key,
             )
+
+    async def _sleep_checked(self, seconds: int, campaign_id: int) -> None:
+        remaining = max(int(seconds), 0)
+        while remaining > 0:
+            await self._ensure_running(campaign_id)
+            chunk = min(STATUS_POLL_SECONDS, remaining)
+            await asyncio.sleep(chunk)
+            remaining -= chunk
+
+    async def _ensure_running(self, campaign_id: int) -> None:
+        campaign = self.db.get_campaign(campaign_id)
+        if campaign is None or campaign.status != CampaignStatus.RUNNING:
+            raise asyncio.CancelledError
+        if not self._campaign_in_schedule(campaign):
+            raise asyncio.CancelledError
+
+    def _campaign_in_schedule(self, campaign: Campaign, now: datetime | None = None) -> bool:
+        moment = now or datetime.now(ZoneInfo(self.timezone))
+        return ScheduleWindow.parse(campaign.schedule_window).contains(moment)
+
+    def _current_blacklist(self) -> Blacklist:
+        return Blacklist.from_entries(self.db.get_blacklist_values())
 
     def _mentions_text(self, recipients: list[Recipient]) -> str:
         mentions = []
