@@ -138,7 +138,7 @@ class DeliveryClient:
         result: list[tuple[str, str]] = []
         for item in _dialog_filter_items(filters):
             folder_id = getattr(item, "id", None)
-            title = getattr(item, "title", None)
+            title = _plain_text(getattr(item, "title", None))
             if folder_id is None or not title:
                 continue
             result.append((str(folder_id), str(title)))
@@ -245,7 +245,7 @@ class DeliveryClient:
         matched_filter = None
         for item in _dialog_filter_items(filters):
             folder_id = str(getattr(item, "id", "")).lower()
-            title = str(getattr(item, "title", "")).lower()
+            title = _plain_text(getattr(item, "title", None)).lower()
             if folder in {folder_id, title}:
                 matched_filter = item
                 break
@@ -278,6 +278,15 @@ def _dialog_filter_items(filters) -> list[Any]:
         return list(items)
     except TypeError:
         return []
+
+
+def _plain_text(value) -> str:
+    if value is None:
+        return ""
+    text = getattr(value, "text", None)
+    if text is not None:
+        return str(text)
+    return str(value)
 
 
 def parse_proxy_url(proxy_url: str | None):
