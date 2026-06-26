@@ -12,6 +12,7 @@ import socks
 from telethon import TelegramClient, functions, utils
 from telethon.errors import SessionPasswordNeededError
 from telethon.tl.custom import Dialog
+from telethon.tl.types import DocumentAttributeVideo
 
 from tg_activity_sender.core import Recipient
 from tg_activity_sender.db import Database, normalize_username
@@ -239,7 +240,14 @@ class DeliveryClient:
                 if not path:
                     continue
                 if media_type == "video_note":
-                    await self.client.send_file(recipient_id, path, video_note=True)
+                    await self.client.send_file(
+                        recipient_id,
+                        path,
+                        attributes=[DocumentAttributeVideo(duration=0, w=240, h=240, round_message=True)],
+                        force_document=False,
+                        mime_type="video/mp4",
+                        video_note=True,
+                    )
                 elif media_type == "voice":
                     await self.client.send_file(recipient_id, path, voice_note=True, caption=text or None)
                 else:
