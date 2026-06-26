@@ -117,6 +117,14 @@ class CampaignWorker:
 
         chat_steps = self.db.get_sequence_steps(campaign.chat_sequence_id or campaign.sequence_id)
         private_steps = self.db.get_sequence_steps(campaign.private_sequence_id or campaign.sequence_id)
+        if campaign.include_chats and not chat_steps:
+            await self._notify(f"Кампания #{campaign.id}: чатовая цепочка пустая или не найдена, отправка остановлена")
+            self.db.update_campaign_status(campaign.id, CampaignStatus.PAUSED)
+            return False
+        if campaign.include_private and not private_steps:
+            await self._notify(f"Кампания #{campaign.id}: ЛС-цепочка пустая или не найдена, отправка остановлена")
+            self.db.update_campaign_status(campaign.id, CampaignStatus.PAUSED)
+            return False
         if not chat_steps and not private_steps:
             await self._notify(f"Кампания #{campaign.id}: нет шагов для отправки")
             return False

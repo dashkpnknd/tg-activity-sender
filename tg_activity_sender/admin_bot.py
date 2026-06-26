@@ -322,7 +322,11 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
         if not message.text.isdigit():
             await message.answer("Нужен ID цепочки числом.")
             return
-        await state.update_data(chat_sequence_id=int(message.text))
+        sequence_id = int(message.text)
+        if sequence_id not in {item.id for item in db.list_sequences()}:
+            await message.answer("Такой цепочки нет. Введи ID из списка выше.")
+            return
+        await state.update_data(chat_sequence_id=sequence_id)
         await state.set_state(CampaignStates.waiting_private_sequence)
         await message.answer("Теперь введи ID цепочки, которая уйдет в ЛС участникам беседы.")
 
@@ -333,7 +337,11 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
         if not message.text.isdigit():
             await message.answer("Нужен ID цепочки числом.")
             return
-        await state.update_data(private_sequence_id=int(message.text))
+        sequence_id = int(message.text)
+        if sequence_id not in {item.id for item in db.list_sequences()}:
+            await message.answer("Такой цепочки нет. Введи ID из списка выше.")
+            return
+        await state.update_data(private_sequence_id=sequence_id)
         accounts = db.list_accounts()
         account_lines = "\n".join(
             f"• @{item.username}" for item in accounts if item.enabled and item.username
