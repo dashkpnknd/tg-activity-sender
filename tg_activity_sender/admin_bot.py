@@ -272,6 +272,7 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
             source_folder="ВСЕ КЛИЕНТЫ",
             source_account_username="localTraffic",
             target_segment="cold",
+            dedupe_key="neuro-seller-localtraffic",
             team_identifiers=DEFAULT_TEAM_IDENTIFIERS,
             segment_window_days=30,
             segment_min_non_team_messages=5,
@@ -331,6 +332,26 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
             await message.answer("Нужен ID цепочки числом.")
             return
         await state.update_data(private_sequence_id=int(message.text))
+        accounts = db.list_accounts()
+        account_lines = "\n".join(
+            f"• @{item.username}" for item in accounts if item.enabled and item.username
+        ) or "Нет добавленных аккаунтов."
+        await state.set_state(CampaignStates.waiting_account)
+        await message.answer(
+            "С какого аккаунта слать? Пришли username без разницы с @ или без.\n"
+            "Если можно с любого, отправь -.\n\n"
+            f"{account_lines}"
+        )
+
+    @router.message(CampaignStates.waiting_account)
+    async def campaign_account(message: Message, state: FSMContext) -> None:
+        if not await guard(message):
+            return
+        raw = message.text.strip()
+        if raw != "-" and not db.find_account_by_username(raw):
+            await message.answer("Такого аккаунта нет в боте. Пришли username из списка или -.")
+            return
+        await state.update_data(source_account_username=None if raw == "-" else raw)
         await state.set_state(CampaignStates.waiting_folder)
         await message.answer(
             "Введи папку чатов: точное название или ID из раздела «Аккаунты -> Папки чатов».\n"
@@ -377,6 +398,17 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
     async def campaign_schedule(message: Message, state: FSMContext) -> None:
         if not await guard(message):
             return
+        await state.update_data(schedule_window=message.text.strip())
+        await state.set_state(CampaignStates.waiting_dedupe_key)
+        await message.answer(
+            "Введи ключ антидубля. Кампании с одинаковым ключом не будут повторно писать тем же чатам и людям.\n"
+            "Например: neuro-seller"
+        )
+
+    @router.message(CampaignStates.waiting_dedupe_key)
+    async def campaign_dedupe_key(message: Message, state: FSMContext) -> None:
+        if not await guard(message):
+            return
         data = await state.get_data()
         campaign = db.create_campaign(
             name=data["name"],
@@ -384,16 +416,19 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
             chat_sequence_id=int(data["chat_sequence_id"]),
             private_sequence_id=int(data["private_sequence_id"]),
             source_folder=data.get("source_folder"),
+            source_account_username=data.get("source_account_username"),
+            dedupe_key=message.text.strip(),
             activity_mode=data["activity_mode"],
             days_threshold=int(data["days"]),
             include_chats=True,
             include_private=True,
-            schedule_window=message.text.strip(),
+            schedule_window=data["schedule_window"],
             delay_between_recipients_seconds=300,
         )
         await state.clear()
         await message.answer(
-            f"Кампания #{campaign.id} создана: папка чатов -> сообщение в чат -> отдельное сообщение участникам."
+            f"Кампания #{campaign.id} создана: папка чатов -> сообщение в чат -> отдельное сообщение участникам.\n"
+            f"Ключ антидубля: {campaign.dedupe_key or '-'}"
         )
 
     @router.callback_query(F.data.in_({"campaign:list_all", "campaign:list_running"}))
@@ -415,7 +450,8 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
                     f"ЛС seq #{item.private_sequence_id or item.sequence_id}, "
                     f"папка: {item.source_folder or 'все группы'}, "
                     f"акк: @{item.source_account_username or 'любой'}, "
-                    f"сегмент: {item.target_segment}"
+                    f"сегмент: {item.target_segment}, "
+                    f"ключ: {item.dedupe_key or '-'}"
                 )
                 buttons.append(
                     [

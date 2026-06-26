@@ -72,6 +72,7 @@ class Campaign(Base):
     source_folder: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_account_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     target_segment: Mapped[str] = mapped_column(String(32), default="all")
+    dedupe_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     team_identifiers: Mapped[list[str]] = mapped_column(JSON, default=list)
     segment_window_days: Mapped[int] = mapped_column(Integer, default=30)
     segment_min_non_team_messages: Mapped[int] = mapped_column(Integer, default=5)
@@ -101,6 +102,7 @@ class DeliveryLog(Base):
     account_telegram_id: Mapped[int] = mapped_column(Integer)
     recipient_id: Mapped[int] = mapped_column(Integer)
     recipient_kind: Mapped[str] = mapped_column(String(32))
+    dedupe_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[str] = mapped_column(String(32))
     detail: Mapped[str] = mapped_column(Text, default="")
 
@@ -126,6 +128,11 @@ def normalize_blacklist_values(value: str | int) -> list[str]:
 
 def normalize_username(value: str | None) -> str:
     return (value or "").strip().rstrip("/").split("/")[-1].removeprefix("@").lower()
+
+
+def normalize_key(value: str | None) -> str | None:
+    normalized = re.sub(r"[^a-z0-9а-я_-]+", "-", (value or "").strip().lower()).strip("-")
+    return normalized or None
 
 
 def display_blacklist_value(value: str) -> str:
@@ -164,12 +171,19 @@ class Database:
             statements.append("ALTER TABLE campaigns ADD COLUMN source_account_username VARCHAR(255)")
         if "target_segment" not in columns:
             statements.append("ALTER TABLE campaigns ADD COLUMN target_segment VARCHAR(32) DEFAULT 'all'")
+        if "dedupe_key" not in columns:
+            statements.append("ALTER TABLE campaigns ADD COLUMN dedupe_key VARCHAR(255)")
         if "team_identifiers" not in columns:
             statements.append("ALTER TABLE campaigns ADD COLUMN team_identifiers JSON DEFAULT '[]'")
         if "segment_window_days" not in columns:
             statements.append("ALTER TABLE campaigns ADD COLUMN segment_window_days INTEGER DEFAULT 30")
         if "segment_min_non_team_messages" not in columns:
             statements.append("ALTER TABLE campaigns ADD COLUMN segment_min_non_team_messages INTEGER DEFAULT 5")
+        log_columns = set()
+        if inspector.has_table("delivery_logs"):
+            log_columns = {column["name"] for column in inspector.get_columns("delivery_logs")}
+        if inspector.has_table("delivery_logs") and "dedupe_key" not in log_columns:
+            statements.append("ALTER TABLE delivery_logs ADD COLUMN dedupe_key VARCHAR(255)")
         with self.engine.begin() as connection:
             for statement in statements:
                 connection.execute(text(statement))
@@ -260,6 +274,7 @@ class Database:
         source_folder: str | None = None,
         source_account_username: str | None = None,
         target_segment: str = "all",
+        dedupe_key: str | None = None,
         team_identifiers: list[str] | None = None,
         segment_window_days: int = 30,
         segment_min_non_team_messages: int = 5,
@@ -273,6 +288,7 @@ class Database:
                 source_folder=source_folder,
                 source_account_username=normalize_username(source_account_username) if source_account_username else None,
                 target_segment=target_segment,
+                dedupe_key=normalize_key(dedupe_key),
                 team_identifiers=team_identifiers or [],
                 segment_window_days=segment_window_days,
                 segment_min_non_team_messages=segment_min_non_team_messages,
@@ -331,6 +347,7 @@ class Database:
         recipient_kind: str,
         status: str,
         detail: str = "",
+        dedupe_key: str | None = None,
     ) -> DeliveryLog:
         with self.session() as session:
             log = DeliveryLog(
@@ -338,6 +355,7 @@ class Database:
                 account_telegram_id=account_telegram_id,
                 recipient_id=recipient_id,
                 recipient_kind=recipient_kind,
+                dedupe_key=normalize_key(dedupe_key),
                 status=status,
                 detail=detail,
             )
@@ -391,6 +409,28 @@ class Database:
             stmt = (
                 select(DeliveryLog.id)
                 .where(DeliveryLog.campaign_id == campaign_id)
+                .where(DeliveryLog.recipient_id == recipient_id)
+                .where(DeliveryLog.recipient_kind == recipient_kind)
+                .where(DeliveryLog.status == status)
+                .limit(1)
+            )
+            return session.scalar(stmt) is not None
+
+    def has_delivery_for_key(
+        self,
+        *,
+        dedupe_key: str | None,
+        recipient_id: int,
+        recipient_kind: str,
+        status: str = "sent",
+    ) -> bool:
+        normalized_key = normalize_key(dedupe_key)
+        if not normalized_key:
+            return False
+        with self.session() as session:
+            stmt = (
+                select(DeliveryLog.id)
+                .where(DeliveryLog.dedupe_key == normalized_key)
                 .where(DeliveryLog.recipient_id == recipient_id)
                 .where(DeliveryLog.recipient_kind == recipient_kind)
                 .where(DeliveryLog.status == status)

@@ -81,6 +81,12 @@ class CampaignWorker:
                             recipient_kind="chat",
                         ):
                             continue
+                        if self.db.has_delivery_for_key(
+                            dedupe_key=campaign.dedupe_key,
+                            recipient_id=chat.id,
+                            recipient_kind="chat",
+                        ):
+                            continue
                         private_recipients = []
                         if campaign.include_private and private_steps:
                             async for participant in delivery.iter_chat_participants(chat.id):
@@ -94,6 +100,12 @@ class CampaignWorker:
                                     recipient_kind="private",
                                 ):
                                     continue
+                                if self.db.has_delivery_for_key(
+                                    dedupe_key=campaign.dedupe_key,
+                                    recipient_id=participant.id,
+                                    recipient_kind="private",
+                                ):
+                                    continue
                                 private_recipients.append(participant)
                         mentions_text = self._mentions_text(private_recipients)
                         if campaign.include_chats and chat_steps:
@@ -101,6 +113,7 @@ class CampaignWorker:
                                 delivery,
                                 campaign_id=campaign.id,
                                 account_telegram_id=account.telegram_id,
+                                dedupe_key=campaign.dedupe_key,
                                 recipient=chat,
                                 steps=chat_steps,
                                 detail_prefix=f"chat; non_team_30d={non_team_messages}",
@@ -113,6 +126,7 @@ class CampaignWorker:
                                     delivery,
                                     campaign_id=campaign.id,
                                     account_telegram_id=account.telegram_id,
+                                    dedupe_key=campaign.dedupe_key,
                                     recipient=participant,
                                     steps=private_steps,
                                     detail_prefix=f"participant of chat {chat.id}; non_team_30d={non_team_messages}",
@@ -127,6 +141,7 @@ class CampaignWorker:
         *,
         campaign_id: int,
         account_telegram_id: int,
+        dedupe_key: str | None,
         recipient: Recipient,
         steps,
         detail_prefix: str,
@@ -150,6 +165,7 @@ class CampaignWorker:
                 recipient_kind=recipient.kind,
                 status="sent",
                 detail=detail_prefix,
+                dedupe_key=dedupe_key,
             )
         except Exception as exc:
             self.db.create_delivery_log(
@@ -159,6 +175,7 @@ class CampaignWorker:
                 recipient_kind=recipient.kind,
                 status="error",
                 detail=f"{detail_prefix}: {str(exc)[:450]}",
+                dedupe_key=dedupe_key,
             )
 
     def _mentions_text(self, recipients: list[Recipient]) -> str:

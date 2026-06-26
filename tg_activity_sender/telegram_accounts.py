@@ -136,7 +136,7 @@ class DeliveryClient:
         except Exception:
             return []
         result: list[tuple[str, str]] = []
-        for item in filters:
+        for item in _dialog_filter_items(filters):
             folder_id = getattr(item, "id", None)
             title = getattr(item, "title", None)
             if folder_id is None or not title:
@@ -243,7 +243,7 @@ class DeliveryClient:
         except Exception:
             return None
         matched_filter = None
-        for item in filters:
+        for item in _dialog_filter_items(filters):
             folder_id = str(getattr(item, "id", "")).lower()
             title = str(getattr(item, "title", "")).lower()
             if folder in {folder_id, title}:
@@ -268,6 +268,16 @@ def _dialog_kind(dialog: Dialog) -> str:
     if getattr(entity, "broadcast", False):
         return "channel"
     return "chat"
+
+
+def _dialog_filter_items(filters) -> list[Any]:
+    if filters is None:
+        return []
+    items = getattr(filters, "filters", filters)
+    try:
+        return list(items)
+    except TypeError:
+        return []
 
 
 def parse_proxy_url(proxy_url: str | None):
