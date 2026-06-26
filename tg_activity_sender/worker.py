@@ -1,19 +1,35 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime
+from html import escape
 from zoneinfo import ZoneInfo
+
+from aiogram import Bot
 
 from tg_activity_sender.core import ActivityMode, Blacklist, CampaignStatus, Recipient, ScheduleWindow, select_recipients
 from tg_activity_sender.db import Database, normalize_username
 from tg_activity_sender.telegram_accounts import AccountManager, DeliveryClient
 
+logger = logging.getLogger(__name__)
+
 
 class CampaignWorker:
-    def __init__(self, db: Database, accounts: AccountManager, *, timezone: str):
+    def __init__(
+        self,
+        db: Database,
+        accounts: AccountManager,
+        *,
+        timezone: str,
+        notification_bot: Bot | None = None,
+        notification_chat_id: int | None = None,
+    ):
         self.db = db
         self.accounts = accounts
         self.timezone = timezone
+        self.notification_bot = notification_bot
+        self.notification_chat_id = notification_chat_id
         self._stopped = asyncio.Event()
 
     async def run_forever(self) -> None:
@@ -48,6 +64,12 @@ class CampaignWorker:
                 try:
                     delivery = DeliveryClient(client)
                     chats = await delivery.scan_group_chats(campaign.source_folder)
+                    await self._notify(
+                        f"Кампания #{campaign.id} {campaign.name}\n"
+                        f"Аккаунт: @{account.username or account.telegram_id}\n"
+                        f"Папка: {campaign.source_folder or 'все группы'}\n"
+                        f"Найдено чатов: {len(chats)}"
+                    )
                     chat_recipients = [
                         Recipient(
                             id=chat.id,
@@ -113,6 +135,7 @@ class CampaignWorker:
                                 delivery,
                                 campaign_id=campaign.id,
                                 account_telegram_id=account.telegram_id,
+                                account_label=account.username or str(account.telegram_id),
                                 dedupe_key=campaign.dedupe_key,
                                 recipient=chat,
                                 steps=chat_steps,
@@ -126,6 +149,7 @@ class CampaignWorker:
                                     delivery,
                                     campaign_id=campaign.id,
                                     account_telegram_id=account.telegram_id,
+                                    account_label=account.username or str(account.telegram_id),
                                     dedupe_key=campaign.dedupe_key,
                                     recipient=participant,
                                     steps=private_steps,
@@ -141,6 +165,7 @@ class CampaignWorker:
         *,
         campaign_id: int,
         account_telegram_id: int,
+        account_label: str,
         dedupe_key: str | None,
         recipient: Recipient,
         steps,
@@ -155,9 +180,22 @@ class CampaignWorker:
                     payload = dict(payload)
                     payload["text"] = f"{payload['text']}\n\n{append_to_first_text}"
                     appended = True
+                await self._notify(
+                    f"Отправляю шаг {step.order}\n"
+                    f"Кампания: #{campaign_id}\n"
+                    f"Аккаунт: @{account_label}\n"
+                    f"Куда: {self._recipient_label(recipient)}\n"
+                    f"Тип: {self._payload_label(payload)}"
+                )
                 await delivery.send_payload(recipient.id, payload)
                 if step.delay_after_seconds:
                     await asyncio.sleep(step.delay_after_seconds)
+            await self._notify(
+                f"Отправлено\n"
+                f"Кампания: #{campaign_id}\n"
+                f"Аккаунт: @{account_label}\n"
+                f"Куда: {self._recipient_label(recipient)}"
+            )
             self.db.create_delivery_log(
                 campaign_id=campaign_id,
                 account_telegram_id=account_telegram_id,
@@ -168,6 +206,13 @@ class CampaignWorker:
                 dedupe_key=dedupe_key,
             )
         except Exception as exc:
+            await self._notify(
+                f"Ошибка отправки\n"
+                f"Кампания: #{campaign_id}\n"
+                f"Аккаунт: @{account_label}\n"
+                f"Куда: {self._recipient_label(recipient)}\n"
+                f"Ошибка: {str(exc)[:450]}"
+            )
             self.db.create_delivery_log(
                 campaign_id=campaign_id,
                 account_telegram_id=account_telegram_id,
@@ -199,3 +244,23 @@ class CampaignWorker:
         }
         team = {normalize_username(item) for item in team_identifiers if item}
         return bool(identifiers & team)
+
+    async def _notify(self, text: str) -> None:
+        if self.notification_bot is None or self.notification_chat_id is None:
+            return
+        try:
+            await self.notification_bot.send_message(self.notification_chat_id, escape(text))
+        except Exception:
+            logger.exception("Failed to send campaign notification")
+
+    def _recipient_label(self, recipient: Recipient) -> str:
+        username = f" @{recipient.username}" if recipient.username else ""
+        return f"{recipient.kind} {recipient.id}{username}"
+
+    def _payload_label(self, payload: dict) -> str:
+        if payload.get("text") and len(payload) == 1:
+            return "text"
+        media_types = [key for key in ("photo", "video", "audio", "document", "voice", "video_note", "sticker", "animation") if payload.get(key)]
+        if payload.get("text") and media_types:
+            return "text+" + "+".join(media_types)
+        return "+".join(media_types) if media_types else "message"

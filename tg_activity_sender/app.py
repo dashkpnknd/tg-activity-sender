@@ -36,7 +36,13 @@ async def main() -> None:
         admin_ids=settings.admin_ids,
         media_dir=settings.media_dir,
     )
-    worker = CampaignWorker(db, account_manager, timezone=settings.timezone)
+    worker = CampaignWorker(
+        db,
+        account_manager,
+        timezone=settings.timezone,
+        notification_bot=bot,
+        notification_chat_id=settings.notification_chat_id,
+    )
     worker_task = asyncio.create_task(worker.run_forever())
     try:
         await dispatcher.start_polling(bot)

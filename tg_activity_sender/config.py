@@ -20,6 +20,7 @@ class Settings:
     timezone: str
     default_schedule_window: str
     default_delay_seconds: int
+    notification_chat_id: int | None
     stop_words: tuple[str, ...]
 
     @classmethod
@@ -42,6 +43,7 @@ class Settings:
             timezone=os.getenv("TIMEZONE", "Europe/Moscow"),
             default_schedule_window=os.getenv("DEFAULT_SCHEDULE_WINDOW", "10:00-20:00"),
             default_delay_seconds=int(os.getenv("DEFAULT_DELAY_SECONDS", "300")),
+            notification_chat_id=_optional_int(os.getenv("NOTIFICATION_CHAT_ID", "-1004270883055")),
             stop_words=tuple(
                 item.strip().lower()
                 for item in os.getenv("STOP_WORDS", "стоп,не писать,отписаться,stop,unsubscribe").split(",")
@@ -55,3 +57,8 @@ def _required(name: str) -> str:
     if not value:
         raise RuntimeError(f"Environment variable {name} is required")
     return value
+
+
+def _optional_int(value: str | None) -> int | None:
+    raw = (value or "").strip()
+    return int(raw) if raw else None
