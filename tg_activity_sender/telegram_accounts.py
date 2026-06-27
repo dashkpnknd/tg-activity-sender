@@ -272,7 +272,10 @@ class DeliveryClient:
             return None
         include_peers = getattr(matched_filter, "include_peers", []) or []
         exclude_peers = getattr(matched_filter, "exclude_peers", []) or []
-        include_peer_ids = await self._peer_ids(include_peers) if include_peers else None
+        if getattr(matched_filter, "groups", False):
+            include_peer_ids = None
+        else:
+            include_peer_ids = await self._peer_ids(include_peers) if include_peers else None
         if include_peer_ids is None and not getattr(matched_filter, "groups", False):
             include_peer_ids = set()
         return FolderPeerFilter(
