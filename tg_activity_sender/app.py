@@ -24,8 +24,8 @@ async def main() -> None:
     db.init()
     account_manager = AccountManager(
         db,
-        api_id=settings.telegram_api_id,
-        api_hash=settings.telegram_api_hash,
+        api_id="<REDACTED>"
+        api_hash="<REDACTED>"
         session_dir=settings.session_dir,
         proxy_url=settings.telegram_proxy_url,
     )
@@ -33,7 +33,7 @@ async def main() -> None:
     dispatcher = build_dispatcher(
         db,
         account_manager,
-        admin_ids=settings.admin_ids,
+        admin_ids="<REDACTED>"
         media_dir=settings.media_dir,
     )
     worker = CampaignWorker(

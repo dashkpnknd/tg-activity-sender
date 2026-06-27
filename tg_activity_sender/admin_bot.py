@@ -121,7 +121,7 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
     async def add_account_qr(callback: CallbackQuery, state: FSMContext) -> None:
         if not await guard(callback):
             return
-        token = uuid.uuid4().hex
+        token = "<REDACTED>"
         await callback.message.edit_text("Создаю QR для входа...")
         try:
             ticket = await account_manager.begin_qr_login(token)
@@ -162,7 +162,7 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
         if not await guard(message):
             return
         data = await state.get_data()
-        token = data.get("qr_token")
+        token = "<REDACTED>"
         if not token:
             await state.clear()
             await message.answer("Не нашёл активную QR-авторизацию. Начни добавление аккаунта заново.")

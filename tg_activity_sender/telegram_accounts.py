@@ -20,7 +20,7 @@ from tg_activity_sender.db import Database, normalize_username
 
 @dataclass
 class QrLoginTicket:
-    token: str
+    token: "<REDACTED>"
     url: str
     qr_png_path: Path
 
@@ -48,8 +48,8 @@ class AccountManager:
         self,
         db: Database,
         *,
-        api_id: int,
-        api_hash: str,
+        api_id: "<REDACTED>"
+        api_hash: "<REDACTED>"
         session_dir: Path,
         proxy_url: str | None = None,
     ):
@@ -192,7 +192,7 @@ class DeliveryClient:
 
     async def count_recent_non_team_messages(
         self,
-        chat_id: int,
+        chat_id: "<REDACTED>"
         *,
         days: int,
         team_identifiers: list[str],

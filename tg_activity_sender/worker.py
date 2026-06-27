@@ -7,6 +7,7 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
+from telethon.errors import FloodWaitError
 
 from tg_activity_sender.core import ActivityMode, Blacklist, CampaignStatus, Recipient, ScheduleWindow, select_recipients
 from tg_activity_sender.db import Campaign, Database, normalize_username
@@ -15,6 +16,7 @@ from tg_activity_sender.telegram_accounts import AccountManager, DeliveryClient
 logger = logging.getLogger(__name__)
 
 POST_CHAT_PRIVATE_DELAY_SECONDS = 60
+PRIVATE_RECIPIENT_DELAY_SECONDS = 90
 IDLE_POLL_SECONDS = 20
 STATUS_POLL_SECONDS = 5
 
@@ -204,7 +206,7 @@ class CampaignWorker:
                         )
                     if private_recipients:
                         await self._sleep_checked(POST_CHAT_PRIVATE_DELAY_SECONDS, campaign.id)
-                        for participant in private_recipients:
+                        for index, participant in enumerate(private_recipients):
                             await self._ensure_running(campaign.id)
                             if self._current_blacklist().matches(participant):
                                 continue
@@ -228,6 +230,8 @@ class CampaignWorker:
                                     f"non_team_{campaign.segment_window_days or 30}d={segment_messages}"
                                 ),
                             )
+                            if index < len(private_recipients) - 1:
+                                await self._sleep_checked(PRIVATE_RECIPIENT_DELAY_SECONDS, campaign.id)
                     await self._sleep_checked(campaign.delay_between_recipients_seconds, campaign.id)
                     return True
             finally:
@@ -332,7 +336,14 @@ class CampaignWorker:
                     f"Куда: {self._recipient_label(recipient)}\n"
                     f"Тип: {self._payload_label(payload)}"
                 )
-                await delivery.send_payload(recipient.id, payload)
+                await self._send_payload_with_flood_wait(
+                    delivery,
+                    recipient.id,
+                    payload,
+                    campaign_id=campaign_id,
+                    account_label=account_label,
+                    recipient=recipient,
+                )
                 if step.delay_after_seconds:
                     await self._sleep_checked(step.delay_after_seconds, campaign_id)
             await self._notify(
@@ -369,6 +380,30 @@ class CampaignWorker:
                 detail=f"{detail_prefix}: {str(exc)[:450]}",
                 dedupe_key=dedupe_key,
             )
+
+    async def _send_payload_with_flood_wait(
+        self,
+        delivery: DeliveryClient,
+        recipient_id: int,
+        payload: dict,
+        *,
+        campaign_id: int,
+        account_label: str,
+        recipient: Recipient,
+    ) -> None:
+        try:
+            await delivery.send_payload(recipient_id, payload)
+        except FloodWaitError as exc:
+            wait_seconds = int(getattr(exc, "seconds", 0) or 0) + 5
+            await self._notify(
+                f"Telegram попросил подождать\n"
+                f"Кампания: #{campaign_id}\n"
+                f"Аккаунт: @{account_label}\n"
+                f"Куда: {self._recipient_label(recipient)}\n"
+                f"Пауза: {wait_seconds} сек."
+            )
+            await self._sleep_checked(wait_seconds, campaign_id)
+            await delivery.send_payload(recipient_id, payload)
 
     async def _sleep_checked(self, seconds: int, campaign_id: int) -> None:
         remaining = max(int(seconds), 0)

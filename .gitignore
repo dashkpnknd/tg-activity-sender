@@ -14,3 +14,16 @@ logs/
 *.db
 *.sqlite
 *.sqlite3
+
+# Runtime and secrets
+*.db-*
+downloads/
+backups/
+tmp/
+secrets/
+profiles/
+venv/
+node_modules/
+*.pyc
+._*
+.DS_Store
