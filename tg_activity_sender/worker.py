@@ -154,12 +154,19 @@ class CampaignWorker:
                 selected_chats = self._select_chats(chats, campaign)
                 for chat in selected_chats:
                     await self._ensure_running(campaign.id)
-                    non_team_messages = await delivery.count_recent_non_team_messages(
+                    activity_messages = await delivery.count_recent_non_team_messages(
+                        chat.id,
+                        days=campaign.days_threshold,
+                        team_identifiers=campaign.team_identifiers or [],
+                    )
+                    if not self._matches_activity(campaign, activity_messages):
+                        continue
+                    segment_messages = await delivery.count_recent_non_team_messages(
                         chat.id,
                         days=campaign.segment_window_days or 30,
                         team_identifiers=campaign.team_identifiers or [],
                     )
-                    if not self._matches_segment(campaign, non_team_messages):
+                    if not self._matches_segment(campaign, segment_messages):
                         continue
 
                     chat_needs_send = bool(campaign.include_chats and chat_steps) and not self._already_sent(
@@ -189,7 +196,10 @@ class CampaignWorker:
                             dedupe_key=campaign.dedupe_key,
                             recipient=chat,
                             steps=chat_steps,
-                            detail_prefix=f"chat; non_team_30d={non_team_messages}",
+                            detail_prefix=(
+                                f"chat; client_{campaign.days_threshold}d={activity_messages}; "
+                                f"non_team_{campaign.segment_window_days or 30}d={segment_messages}"
+                            ),
                             append_to_first_text=mentions_text,
                         )
                     if private_recipients:
@@ -212,7 +222,11 @@ class CampaignWorker:
                                 dedupe_key=campaign.dedupe_key,
                                 recipient=participant,
                                 steps=private_steps,
-                                detail_prefix=f"participant of chat {chat.id}; non_team_30d={non_team_messages}",
+                                detail_prefix=(
+                                    f"participant of chat {chat.id}; "
+                                    f"client_{campaign.days_threshold}d={activity_messages}; "
+                                    f"non_team_{campaign.segment_window_days or 30}d={segment_messages}"
+                                ),
                             )
                     await self._sleep_checked(campaign.delay_between_recipients_seconds, campaign.id)
                     return True
@@ -233,7 +247,7 @@ class CampaignWorker:
         ]
         return select_recipients(
             chat_recipients,
-            mode=ActivityMode(campaign.activity_mode),
+            mode=ActivityMode.BOTH,
             days_threshold=campaign.days_threshold,
             include_chats=True,
             include_private=False,
@@ -267,6 +281,13 @@ class CampaignWorker:
             return False
         if campaign.target_segment == "cold" and non_team_messages > campaign.segment_min_non_team_messages:
             return False
+        return True
+
+    def _matches_activity(self, campaign: Campaign, client_messages: int) -> bool:
+        if campaign.activity_mode == ActivityMode.ACTIVE:
+            return client_messages > 0
+        if campaign.activity_mode == ActivityMode.INACTIVE:
+            return client_messages == 0
         return True
 
     def _already_sent(self, *, campaign: Campaign, recipient_id: int, recipient_kind: str) -> bool:
