@@ -404,16 +404,24 @@ class Database:
             stmt = select(DeliveryLog).order_by(DeliveryLog.id.desc()).limit(limit)
             return list(session.scalars(stmt))
 
-    def has_delivery_log(self, *, campaign_id: int, recipient_id: int, recipient_kind: str, status: str = "sent") -> bool:
+    def has_delivery_log(
+        self,
+        *,
+        campaign_id: int,
+        recipient_id: int,
+        recipient_kind: str,
+        status: str | None = "sent",
+    ) -> bool:
         with self.session() as session:
             stmt = (
                 select(DeliveryLog.id)
                 .where(DeliveryLog.campaign_id == campaign_id)
                 .where(DeliveryLog.recipient_id == recipient_id)
                 .where(DeliveryLog.recipient_kind == recipient_kind)
-                .where(DeliveryLog.status == status)
                 .limit(1)
             )
+            if status is not None:
+                stmt = stmt.where(DeliveryLog.status == status)
             return session.scalar(stmt) is not None
 
     def has_delivery_for_key(
@@ -422,7 +430,7 @@ class Database:
         dedupe_key: str | None,
         recipient_id: int,
         recipient_kind: str,
-        status: str = "sent",
+        status: str | None = "sent",
     ) -> bool:
         normalized_key = normalize_key(dedupe_key)
         if not normalized_key:
@@ -433,7 +441,8 @@ class Database:
                 .where(DeliveryLog.dedupe_key == normalized_key)
                 .where(DeliveryLog.recipient_id == recipient_id)
                 .where(DeliveryLog.recipient_kind == recipient_kind)
-                .where(DeliveryLog.status == status)
                 .limit(1)
             )
+            if status is not None:
+                stmt = stmt.where(DeliveryLog.status == status)
             return session.scalar(stmt) is not None

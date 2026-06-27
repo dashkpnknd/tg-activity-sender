@@ -295,10 +295,12 @@ class CampaignWorker:
             campaign_id=campaign.id,
             recipient_id=recipient_id,
             recipient_kind=recipient_kind,
+            status=None,
         ) or self.db.has_delivery_for_key(
             dedupe_key=campaign.dedupe_key,
             recipient_id=recipient_id,
             recipient_kind=recipient_kind,
+            status=None,
         )
 
     async def _send_steps(
