@@ -275,31 +275,7 @@ class CampaignWorker:
         for chat in chats:
             if project_key_from_chat_title(chat.title) in protected_keys:
                 protected_ids.add(chat.id)
-        participant_sets = []
-        for chat in chats:
-            if chat.id not in protected_ids:
-                continue
-            participants = await self._non_team_participant_ids(delivery, chat.id, campaign, account_telegram_id)
-            if participants:
-                participant_sets.append(participants)
-        if participant_sets:
-            for chat in chats:
-                if chat.id in protected_ids:
-                    continue
-                participants = await self._non_team_participant_ids(delivery, chat.id, campaign, account_telegram_id)
-                if participants and participants in participant_sets:
-                    protected_ids.add(chat.id)
         return [chat for chat in chats if chat.id not in protected_ids], len(protected_ids)
-
-    async def _non_team_participant_ids(self, delivery: DeliveryClient, chat_id: int, campaign: Campaign, account_telegram_id: int) -> frozenset[int]:
-        participant_ids = set()
-        async for participant in delivery.iter_chat_participants(chat_id):
-            if participant.id == account_telegram_id:
-                continue
-            if self._is_team_recipient(participant, campaign.team_identifiers or []):
-                continue
-            participant_ids.add(participant.id)
-        return frozenset(participant_ids)
 
     def _select_chats(self, chats, campaign: Campaign) -> list[Recipient]:
         chat_recipients = [
