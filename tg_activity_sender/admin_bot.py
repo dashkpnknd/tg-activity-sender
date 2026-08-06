@@ -39,6 +39,8 @@ DEFAULT_TEAM_IDENTIFIERS = [
     "Ksenia_LocalLead",
     "Оксана",
     "Даниил",
+    "gelik",
+    "geliktok",
     "localTraffic",
     "LocalTraffic",
     "local трафик",
