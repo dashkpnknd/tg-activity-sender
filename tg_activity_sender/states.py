@@ -20,6 +20,8 @@ class CampaignStates(StatesGroup):
     waiting_days = State()
     waiting_schedule = State()
     waiting_dedupe_key = State()
+    waiting_avito_exclusion = State()
+    waiting_avito_clients = State()
 
 
 class BlacklistStates(StatesGroup):

@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime, time
 from enum import StrEnum
 from typing import Iterable
+import re
+import unicodedata
 
 
 class ActivityMode(StrEnum):
@@ -48,6 +50,20 @@ class Recipient:
     kind: str
     username: str | None
     days_since_last_message: int
+
+
+def is_avito_chat_title(title: str) -> bool:
+    """Return whether a chat title explicitly identifies the Avito channel."""
+    return bool(re.search(r"(?<![a-zа-я])авито|(?<![a-zа-я])avito", title.casefold()))
+
+
+def project_key_from_chat_title(title: str) -> str:
+    """Extract a stable project key from a Telegram chat title."""
+    first_segment = title.split("|", 1)[0]
+    value = unicodedata.normalize("NFKC", first_segment).casefold()
+    value = re.sub(r"\b(?:авито|avito|вк|vk|target|таргет)\b", " ", value)
+    value = re.sub(r"[^a-zа-я0-9]+", " ", value).strip()
+    return re.sub(r"\s+", " ", value)
 
 
 @dataclass(frozen=True)
@@ -117,4 +133,3 @@ def can_transition(current: CampaignStatus, target: CampaignStatus) -> bool:
         CampaignStatus.FINISHED: set(),
     }
     return target in allowed[current]
-

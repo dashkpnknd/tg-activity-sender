@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -419,6 +420,41 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
     async def campaign_dedupe_key(message: Message, state: FSMContext) -> None:
         if not await guard(message):
             return
+        await state.update_data(dedupe_key=message.text.strip())
+        await state.set_state(CampaignStates.waiting_avito_exclusion)
+        await message.answer(
+            "Включить защиту от действующих Avito-клиентов?\n"
+            "1 — да: исключить активные Avito-чаты за 5 дней и связанные с ними чаты\n"
+            "2 — нет"
+        )
+
+    @router.message(CampaignStates.waiting_avito_exclusion)
+    async def campaign_avito_exclusion(message: Message, state: FSMContext) -> None:
+        if not await guard(message):
+            return
+        if message.text.strip() not in {"1", "2"}:
+            await message.answer("Отправь 1 или 2.")
+            return
+        enabled = message.text.strip() == "1"
+        await state.update_data(avito_exclusion_enabled=enabled)
+        if not enabled:
+            await create_campaign_from_state(message, state, avito_client_names=[])
+            return
+        await state.set_state(CampaignStates.waiting_avito_clients)
+        await message.answer(
+            "Пришли дополнительный список действующих клиентов Avito: названия проектов через запятую, "
+            "каждый с новой строки или '-'. Например: Apple Market, AppShop."
+        )
+
+    @router.message(CampaignStates.waiting_avito_clients)
+    async def campaign_avito_clients(message: Message, state: FSMContext) -> None:
+        if not await guard(message):
+            return
+        raw = message.text.strip()
+        names = [] if raw == "-" else [item.strip() for item in re.split(r"[,;\n]+", raw) if item.strip()]
+        await create_campaign_from_state(message, state, avito_client_names=names)
+
+    async def create_campaign_from_state(message: Message, state: FSMContext, *, avito_client_names: list[str]) -> None:
         data = await state.get_data()
         campaign = db.create_campaign(
             name=data["name"],
@@ -427,7 +463,7 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
             private_sequence_id=int(data["private_sequence_id"]),
             source_folder=data.get("source_folder"),
             source_account_username=data.get("source_account_username"),
-            dedupe_key=message.text.strip(),
+            dedupe_key=data["dedupe_key"],
             activity_mode=data["activity_mode"],
             days_threshold=int(data["days"]),
             include_chats=True,
@@ -435,11 +471,15 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
             schedule_window=data["schedule_window"],
             delay_between_recipients_seconds=300,
             team_identifiers=DEFAULT_TEAM_IDENTIFIERS,
+            avito_exclusion_enabled=bool(data.get("avito_exclusion_enabled")),
+            avito_activity_days=5,
+            avito_client_names=avito_client_names,
         )
         await state.clear()
         await message.answer(
             f"Кампания #{campaign.id} создана: папка чатов -> сообщение в чат -> отдельное сообщение участникам.\n"
-            f"Ключ антидубля: {campaign.dedupe_key or '-'}"
+            f"Ключ антидубля: {campaign.dedupe_key or '-'}\n"
+            f"Защита Avito: {'включена (5 дней)' if campaign.avito_exclusion_enabled else 'выключена'}"
         )
 
     @router.callback_query(F.data.in_({"campaign:list_all", "campaign:list_running"}))
@@ -462,6 +502,7 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
                     f"папка: {item.source_folder or 'все группы'}, "
                     f"акк: @{item.source_account_username or 'любой'}, "
                     f"сегмент: {item.target_segment}, "
+                    f"Avito-защита: {'да' if item.avito_exclusion_enabled else 'нет'}, "
                     f"ключ: {item.dedupe_key or '-'}"
                 )
                 buttons.append(

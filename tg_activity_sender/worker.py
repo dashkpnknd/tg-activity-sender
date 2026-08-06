@@ -9,7 +9,10 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot
 from telethon.errors import FloodWaitError
 
-from tg_activity_sender.core import ActivityMode, Blacklist, CampaignStatus, Recipient, ScheduleWindow, select_recipients
+from tg_activity_sender.core import (
+    ActivityMode, Blacklist, CampaignStatus, Recipient, ScheduleWindow,
+    is_avito_chat_title, project_key_from_chat_title, select_recipients,
+)
 from tg_activity_sender.db import Campaign, Database, normalize_username
 from tg_activity_sender.telegram_accounts import AccountManager, DeliveryClient
 
@@ -147,6 +150,14 @@ class CampaignWorker:
             try:
                 delivery = DeliveryClient(client)
                 chats = await delivery.scan_group_chats(campaign.source_folder)
+                if campaign.avito_exclusion_enabled:
+                    chats, excluded_count = await self._exclude_avito_client_chats(
+                        delivery, campaign, chats, account_telegram_id=account.telegram_id,
+                    )
+                    await self._notify(
+                        f"Кампания #{campaign.id}: Avito-защита исключила {excluded_count} чатов. "
+                        f"Осталось для отбора: {len(chats)}"
+                    )
                 await self._notify(
                     f"Кампания #{campaign.id} {campaign.name}\n"
                     f"Аккаунт: @{account.username or account.telegram_id}\n"
@@ -237,6 +248,58 @@ class CampaignWorker:
             finally:
                 await client.disconnect()
         return False
+
+    async def _exclude_avito_client_chats(self, delivery: DeliveryClient, campaign: Campaign, chats, *, account_telegram_id: int):
+        """Remove chats belonging to current Avito clients before campaign filters apply."""
+        protected_keys = {
+            project_key_from_chat_title(name)
+            for name in (campaign.avito_client_names or [])
+            if project_key_from_chat_title(name)
+        }
+        protected_ids: set[int] = set()
+        for chat in chats:
+            key = project_key_from_chat_title(chat.title)
+            if key and key in protected_keys:
+                protected_ids.add(chat.id)
+                continue
+            if not is_avito_chat_title(chat.title):
+                continue
+            messages = await delivery.count_recent_non_team_messages(
+                chat.id, days=campaign.avito_activity_days or 5,
+                team_identifiers=campaign.team_identifiers or [],
+            )
+            if messages > 0:
+                protected_ids.add(chat.id)
+                if key:
+                    protected_keys.add(key)
+        for chat in chats:
+            if project_key_from_chat_title(chat.title) in protected_keys:
+                protected_ids.add(chat.id)
+        participant_sets = []
+        for chat in chats:
+            if chat.id not in protected_ids:
+                continue
+            participants = await self._non_team_participant_ids(delivery, chat.id, campaign, account_telegram_id)
+            if participants:
+                participant_sets.append(participants)
+        if participant_sets:
+            for chat in chats:
+                if chat.id in protected_ids:
+                    continue
+                participants = await self._non_team_participant_ids(delivery, chat.id, campaign, account_telegram_id)
+                if participants and participants in participant_sets:
+                    protected_ids.add(chat.id)
+        return [chat for chat in chats if chat.id not in protected_ids], len(protected_ids)
+
+    async def _non_team_participant_ids(self, delivery: DeliveryClient, chat_id: int, campaign: Campaign, account_telegram_id: int) -> frozenset[int]:
+        participant_ids = set()
+        async for participant in delivery.iter_chat_participants(chat_id):
+            if participant.id == account_telegram_id:
+                continue
+            if self._is_team_recipient(participant, campaign.team_identifiers or []):
+                continue
+            participant_ids.add(participant.id)
+        return frozenset(participant_ids)
 
     def _select_chats(self, chats, campaign: Campaign) -> list[Recipient]:
         chat_recipients = [

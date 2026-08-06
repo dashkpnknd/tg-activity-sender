@@ -76,6 +76,9 @@ class Campaign(Base):
     team_identifiers: Mapped[list[str]] = mapped_column(JSON, default=list)
     segment_window_days: Mapped[int] = mapped_column(Integer, default=30)
     segment_min_non_team_messages: Mapped[int] = mapped_column(Integer, default=5)
+    avito_exclusion_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    avito_activity_days: Mapped[int] = mapped_column(Integer, default=5)
+    avito_client_names: Mapped[list[str]] = mapped_column(JSON, default=list)
     activity_mode: Mapped[ActivityMode] = mapped_column(String(32))
     days_threshold: Mapped[int] = mapped_column(Integer)
     include_chats: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -179,6 +182,12 @@ class Database:
             statements.append("ALTER TABLE campaigns ADD COLUMN segment_window_days INTEGER DEFAULT 30")
         if "segment_min_non_team_messages" not in columns:
             statements.append("ALTER TABLE campaigns ADD COLUMN segment_min_non_team_messages INTEGER DEFAULT 5")
+        if "avito_exclusion_enabled" not in columns:
+            statements.append("ALTER TABLE campaigns ADD COLUMN avito_exclusion_enabled BOOLEAN DEFAULT 0")
+        if "avito_activity_days" not in columns:
+            statements.append("ALTER TABLE campaigns ADD COLUMN avito_activity_days INTEGER DEFAULT 5")
+        if "avito_client_names" not in columns:
+            statements.append("ALTER TABLE campaigns ADD COLUMN avito_client_names JSON DEFAULT '[]'")
         log_columns = set()
         if inspector.has_table("delivery_logs"):
             log_columns = {column["name"] for column in inspector.get_columns("delivery_logs")}
@@ -278,6 +287,9 @@ class Database:
         team_identifiers: list[str] | None = None,
         segment_window_days: int = 30,
         segment_min_non_team_messages: int = 5,
+        avito_exclusion_enabled: bool = False,
+        avito_activity_days: int = 5,
+        avito_client_names: list[str] | None = None,
     ) -> Campaign:
         with self.session() as session:
             campaign = Campaign(
@@ -292,6 +304,9 @@ class Database:
                 team_identifiers=team_identifiers or [],
                 segment_window_days=segment_window_days,
                 segment_min_non_team_messages=segment_min_non_team_messages,
+                avito_exclusion_enabled=avito_exclusion_enabled,
+                avito_activity_days=avito_activity_days,
+                avito_client_names=avito_client_names or [],
                 activity_mode=activity_mode,
                 days_threshold=days_threshold,
                 include_chats=include_chats,
