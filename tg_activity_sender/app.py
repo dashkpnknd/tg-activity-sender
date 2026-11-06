@@ -5,6 +5,8 @@ import logging
 
 from aiogram import Bot
 from aiogram.enums import ParseMode
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.client.default import DefaultBotProperties
 
 from tg_activity_sender.admin_bot import build_dispatcher
@@ -24,16 +26,22 @@ async def main() -> None:
     db.init()
     account_manager = AccountManager(
         db,
-        api_id="<REDACTED>"
-        api_hash="<REDACTED>"
+        api_id=settings.telegram_api_id,
+        api_hash=settings.telegram_api_hash,
         session_dir=settings.session_dir,
         proxy_url=settings.telegram_proxy_url,
     )
-    bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = Bot(
+        settings.bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        session=AiohttpSession(
+            api=TelegramAPIServer.from_base("http://127.0.0.1:8081", is_local=True)
+        ),
+    )
     dispatcher = build_dispatcher(
         db,
         account_manager,
-        admin_ids="<REDACTED>"
+        admin_ids=settings.admin_ids,
         media_dir=settings.media_dir,
     )
     worker = CampaignWorker(

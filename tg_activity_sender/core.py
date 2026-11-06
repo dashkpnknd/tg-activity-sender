@@ -50,6 +50,7 @@ class Recipient:
     kind: str
     username: str | None
     days_since_last_message: int
+    display_name: str | None = None
 
 
 def is_avito_chat_title(title: str) -> bool:

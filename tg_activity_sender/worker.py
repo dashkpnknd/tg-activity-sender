@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
+import sys
 from datetime import datetime
 from html import escape
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from telethon.errors import FloodWaitError
+from telethon.errors import ChannelPrivateError, ChatAdminRequiredError, UserBannedInChannelError, ChatWriteForbiddenError
 
 from tg_activity_sender.core import (
     ActivityMode, Blacklist, CampaignStatus, Recipient, ScheduleWindow,
@@ -15,6 +18,13 @@ from tg_activity_sender.core import (
 )
 from tg_activity_sender.db import Campaign, Database, normalize_username
 from tg_activity_sender.telegram_accounts import AccountManager, DeliveryClient
+
+sys.path.insert(0, '/opt/tg-activity-sender-campaign11')
+from campaign_partition import allowed_ids as partition_allowed_ids, guard as partition_guard
+from campaign_partition import claim_video, finish_video_claim
+from campaign_partition import video_all_mode, video_all_rows, block_video_chat
+from account_scheduler import claim_slot, finish_slot, release_slot, mark_unavailable
+from video_pins import enqueue_pin, process_pin, has_due_pins
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +132,12 @@ class CampaignWorker:
             self._campaign_tasks.pop(campaign_id, None)
 
     async def _process_one_chat(self, campaign: Campaign) -> bool:
+        if campaign.id == 10:
+            await self._process_pending_video_pin(campaign)
+        if campaign.id == 10 and not partition_allowed_ids(10):
+            return False
+        if campaign.id == 10 and video_all_mode():
+            return await self._process_prepared_video(campaign)
         accounts = [account for account in self.db.list_accounts() if account.enabled]
         if campaign.source_account_username:
             source_username = normalize_username(campaign.source_account_username)
@@ -151,11 +167,11 @@ class CampaignWorker:
                 delivery = DeliveryClient(client)
                 chats = await delivery.scan_group_chats(campaign.source_folder)
                 if campaign.avito_exclusion_enabled:
-                    chats, excluded_count = await self._exclude_avito_client_chats(
+                    chats, excluded_count = await self._exclude_active_sibling_chats(
                         delivery, campaign, chats, account_telegram_id=account.telegram_id,
                     )
                     await self._notify(
-                        f"Кампания #{campaign.id}: Avito-защита исключила {excluded_count} чатов. "
+                        f"Кампания #{campaign.id}: межканальная защита исключила {excluded_count} чатов. "
                         f"Осталось для отбора: {len(chats)}"
                     )
                 await self._notify(
@@ -187,19 +203,21 @@ class CampaignWorker:
                         recipient_id=chat.id,
                         recipient_kind="chat",
                     )
-                    private_recipients = []
-                    if campaign.include_private and private_steps:
-                        private_recipients = await self._private_recipients_for_chat(
-                            delivery,
-                            campaign,
-                            chat,
-                            account_telegram_id=account.telegram_id,
-                        )
+                    mention_recipients = await self._private_recipients_for_chat(
+                        delivery,
+                        campaign,
+                        chat,
+                        account_telegram_id=account.telegram_id,
+                    )
+                    private_recipients = mention_recipients if campaign.include_private and private_steps else []
 
                     if not chat_needs_send and not private_recipients:
                         continue
 
-                    mentions_text = self._mentions_text(private_recipients)
+                    mentions_text = self._mentions_text(mention_recipients)
+                    if campaign.id == 10:
+                        if not mention_recipients or not await partition_guard(client, 10, chat.id):
+                            continue
                     if chat_needs_send:
                         await self._send_steps(
                             delivery,
@@ -243,14 +261,94 @@ class CampaignWorker:
                             )
                             if index < len(private_recipients) - 1:
                                 await self._sleep_checked(PRIVATE_RECIPIENT_DELAY_SECONDS, campaign.id)
-                    await self._sleep_checked(campaign.delay_between_recipients_seconds, campaign.id)
+                    if campaign.id != 10:
+                        await self._sleep_checked(self._recipient_delay_seconds(campaign), campaign.id)
                     return True
+            finally:
+                await client.disconnect()
+        if campaign.id == 10:
+            mark_unavailable(10)
+        return False
+
+    async def _process_pending_video_pin(self, campaign: Campaign) -> None:
+        import json
+        from pathlib import Path
+        control=json.loads(Path('/opt/tg-activity-sender-campaign11/partition_control.json').read_text())
+        if not control.get('10') or not has_due_pins(self.db.path):
+            return
+        for account in self.db.list_accounts():
+            if not account.enabled or normalize_username(account.username)!=normalize_username(campaign.source_account_username):
+                continue
+            await self._ensure_running(10)
+            client=await self.accounts.client_for(account.session_path)
+            try:
+                result=await process_pin(self.db.path,DeliveryClient(client))
+                await self._report_video_pin(result)
+            finally:
+                await client.disconnect()
+            return
+
+    async def _report_video_pin(self, result) -> None:
+        if result and result['status']=='blocked':
+            await self._notify(
+                f"Видео отправлено, но закрепление недоступно\n"
+                f"Чат: {result['chat_id']}\nСообщение: {result['message_id']}\n"
+                f"Причина: {result['error']}\nПовторной отправки видео не будет.")
+
+    async def _process_prepared_video(self, campaign: Campaign) -> bool:
+        """Send from the fixed video queue without repeatedly listing dialogs."""
+        accounts = [a for a in self.db.list_accounts() if a.enabled
+                    and normalize_username(a.username) == normalize_username(campaign.source_account_username)]
+        steps = self.db.get_sequence_steps(campaign.chat_sequence_id or campaign.sequence_id)
+        if not steps or not campaign.include_chats or campaign.include_private:
+            raise RuntimeError("Invalid video-only campaign settings")
+        for account in accounts:
+            client = await self.accounts.client_for(account.session_path)
+            try:
+                delivery = DeliveryClient(client)
+                for row in video_all_rows():
+                    cid = row['id']
+                    if cid not in partition_allowed_ids(10):
+                        continue
+                    await self._ensure_running(10)
+                    chat = Recipient(id=cid, kind='chat', username=None, days_since_last_message=0)
+                    if cid == self.notification_chat_id or self._current_blacklist().matches(chat):
+                        block_video_chat(cid, 'blacklist_or_admin_chat')
+                        continue
+                    if self._already_sent(campaign=campaign, recipient_id=cid, recipient_kind='chat'):
+                        continue
+                    try:
+                        if not await partition_guard(client, 10, cid):
+                            if cid in partition_allowed_ids(10):
+                                block_video_chat(cid, 'destination_changed_or_outside_folder')
+                            continue
+                        members = await self._private_recipients_for_chat(
+                            delivery, campaign, chat, account_telegram_id=account.telegram_id)
+                    except (ChannelPrivateError, ChatAdminRequiredError, UserBannedInChannelError, ChatWriteForbiddenError) as exc:
+                        block_video_chat(cid, type(exc).__name__)
+                        continue
+                    if not members:
+                        block_video_chat(cid, 'no_external_members')
+                        continue
+                    # Recheck switches and the shared timer after reading members.
+                    if cid not in partition_allowed_ids(10):
+                        return False
+                    await self._send_steps(
+                        delivery, campaign_id=10, account_telegram_id=account.telegram_id,
+                        account_label=account.username or str(account.telegram_id),
+                        dedupe_key=campaign.dedupe_key, recipient=chat, steps=steps,
+                        detail_prefix='chat; video_all_clients',
+                        append_to_first_text=self._mentions_text(members))
+                    return True
+            except FloodWaitError as exc:
+                await self._sleep_checked(exc.seconds + 5, 10)
+                return False
             finally:
                 await client.disconnect()
         return False
 
-    async def _exclude_avito_client_chats(self, delivery: DeliveryClient, campaign: Campaign, chats, *, account_telegram_id: int):
-        """Remove chats belonging to current Avito clients before campaign filters apply."""
+    async def _exclude_active_sibling_chats(self, delivery: DeliveryClient, campaign: Campaign, chats, *, account_telegram_id: int):
+        """Exclude every channel for a project when any sibling chat has recent client activity."""
         protected_keys = {
             project_key_from_chat_title(name)
             for name in (campaign.avito_client_names or [])
@@ -261,8 +359,6 @@ class CampaignWorker:
             key = project_key_from_chat_title(chat.title)
             if key and key in protected_keys:
                 protected_ids.add(chat.id)
-                continue
-            if not is_avito_chat_title(chat.title):
                 continue
             messages = await delivery.count_recent_non_team_messages(
                 chat.id, days=campaign.avito_activity_days or 5,
@@ -278,6 +374,9 @@ class CampaignWorker:
         return [chat for chat in chats if chat.id not in protected_ids], len(protected_ids)
 
     def _select_chats(self, chats, campaign: Campaign) -> list[Recipient]:
+        if campaign.id == 10:
+            approved = partition_allowed_ids(10)
+            chats = [chat for chat in chats if chat.id in approved]
         chat_recipients = [
             Recipient(
                 id=chat.id,
@@ -326,6 +425,14 @@ class CampaignWorker:
             return False
         return True
 
+
+    def _recipient_delay_seconds(self, campaign: Campaign) -> int:
+        minimum = max(int(campaign.delay_between_recipients_seconds), 0)
+        maximum = campaign.delay_between_recipients_max_seconds
+        if maximum is None:
+            return minimum
+        return random.randint(minimum, max(minimum, int(maximum)))
+
     def _matches_activity(self, campaign: Campaign, client_messages: int) -> bool:
         if campaign.activity_mode == ActivityMode.ACTIVE:
             return client_messages > 0
@@ -359,6 +466,25 @@ class CampaignWorker:
         detail_prefix: str,
         append_to_first_text: str = "",
     ) -> None:
+        video_claim = None
+        account_claim = None
+        if campaign_id == 10:
+            campaign = self.db.get_campaign(10)
+            await self._ensure_running(10)
+            account_claim = claim_slot(10, recipient.id)
+            if account_claim is None:
+                return
+            try:
+                video_claim = claim_video(
+                    self.db.path, account_telegram_id, recipient.id, recipient.kind,
+                    detail_prefix, dedupe_key, self._recipient_delay_seconds(campaign),
+                )
+            except Exception:
+                release_slot(account_claim)
+                raise
+            if video_claim is None:
+                release_slot(account_claim)
+                return
         try:
             appended = False
             for step in steps:
@@ -366,7 +492,12 @@ class CampaignWorker:
                 payload = step.payload
                 if append_to_first_text and not appended and payload.get("text"):
                     payload = dict(payload)
-                    payload["text"] = f"{payload['text']}\n\n{append_to_first_text}"
+                    separator = " " if campaign_id == 10 else "\n\n"
+                    payload["text"] = f"{payload['text']}{separator}{append_to_first_text}"
+                    appended = True
+                if append_to_first_text and not appended and payload.get("copy_from_saved_message_id"):
+                    payload = dict(payload)
+                    payload["append_after_copy"] = append_to_first_text
                     appended = True
                 await self._notify(
                     f"Отправляю шаг {step.order}\n"
@@ -375,7 +506,7 @@ class CampaignWorker:
                     f"Куда: {self._recipient_label(recipient)}\n"
                     f"Тип: {self._payload_label(payload)}"
                 )
-                await self._send_payload_with_flood_wait(
+                sent_message_id = await self._send_payload_with_flood_wait(
                     delivery,
                     recipient.id,
                     payload,
@@ -383,6 +514,8 @@ class CampaignWorker:
                     account_label=account_label,
                     recipient=recipient,
                 )
+                if campaign_id == 10 and recipient.kind == 'chat' and payload.get('copy_from_saved_message_id'):
+                    enqueue_pin(self.db.path,recipient.id,sent_message_id)
                 if step.delay_after_seconds:
                     await self._sleep_checked(step.delay_after_seconds, campaign_id)
             await self._notify(
@@ -391,6 +524,17 @@ class CampaignWorker:
                 f"Аккаунт: @{account_label}\n"
                 f"Куда: {self._recipient_label(recipient)}"
             )
+            if video_claim is not None:
+                finish_video_claim(self.db.path, video_claim, "sent", detail_prefix)
+                finish_slot(account_claim, "sent")
+                # Sending is already committed. A pin failure cannot change it
+                # into an uncertain delivery or cause another copy of the video.
+                try:
+                    result=await process_pin(self.db.path,delivery,chat_id=recipient.id)
+                    await self._report_video_pin(result)
+                except Exception:
+                    logger.exception('Pin processing failed for chat %s; durable job retained',recipient.id)
+                return
             self.db.create_delivery_log(
                 campaign_id=campaign_id,
                 account_telegram_id=account_telegram_id,
@@ -401,6 +545,9 @@ class CampaignWorker:
                 dedupe_key=dedupe_key,
             )
         except asyncio.CancelledError:
+            if video_claim is not None:
+                finish_video_claim(self.db.path, video_claim, "uncertain", detail_prefix + "; interrupted; manual review only")
+                finish_slot(account_claim, "uncertain")
             raise
         except Exception as exc:
             await self._notify(
@@ -410,6 +557,10 @@ class CampaignWorker:
                 f"Куда: {self._recipient_label(recipient)}\n"
                 f"Ошибка: {str(exc)[:450]}"
             )
+            if video_claim is not None:
+                finish_video_claim(self.db.path, video_claim, "uncertain", f"{detail_prefix}: {str(exc)[:450]}")
+                finish_slot(account_claim, "uncertain")
+                return
             self.db.create_delivery_log(
                 campaign_id=campaign_id,
                 account_telegram_id=account_telegram_id,
@@ -429,9 +580,9 @@ class CampaignWorker:
         campaign_id: int,
         account_label: str,
         recipient: Recipient,
-    ) -> None:
+    ) -> int | None:
         try:
-            await delivery.send_payload(recipient_id, payload)
+            return await delivery.send_payload(recipient_id, payload)
         except FloodWaitError as exc:
             wait_seconds = int(getattr(exc, "seconds", 0) or 0) + 5
             await self._notify(
@@ -442,7 +593,7 @@ class CampaignWorker:
                 f"Пауза: {wait_seconds} сек."
             )
             await self._sleep_checked(wait_seconds, campaign_id)
-            await delivery.send_payload(recipient_id, payload)
+            return await delivery.send_payload(recipient_id, payload)
 
     async def _sleep_checked(self, seconds: int, campaign_id: int) -> None:
         remaining = max(int(seconds), 0)
@@ -499,13 +650,15 @@ class CampaignWorker:
         seen = set()
         for recipient in recipients:
             username = (recipient.username or "").strip().removeprefix("@")
-            if not username:
+            identifier = normalize_username(username) if username else str(recipient.id)
+            if not identifier or identifier in seen:
                 continue
-            normalized = normalize_username(username)
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            mentions.append(f"@{username}")
+            seen.add(identifier)
+            if username:
+                mentions.append(f"@{username}")
+            else:
+                label = escape((recipient.display_name or "участник").strip())
+                mentions.append(f'<a href="tg://user?id={recipient.id}">{label}</a>')
         return " ".join(mentions)
 
     def _is_team_recipient(self, recipient: Recipient, team_identifiers: list[str]) -> bool:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -9,7 +10,7 @@ from urllib.parse import urlparse
 
 import qrcode
 import socks
-from telethon import TelegramClient, functions, utils
+from telethon import TelegramClient, functions, utils, types
 from telethon.errors import SessionPasswordNeededError
 from telethon.tl.custom import Dialog
 from telethon.tl.types import DocumentAttributeVideo
@@ -20,7 +21,7 @@ from tg_activity_sender.db import Database, normalize_username
 
 @dataclass
 class QrLoginTicket:
-    token: "<REDACTED>"
+    token: str
     url: str
     qr_png_path: Path
 
@@ -48,8 +49,8 @@ class AccountManager:
         self,
         db: Database,
         *,
-        api_id: "<REDACTED>"
-        api_hash: "<REDACTED>"
+        api_id: int,
+        api_hash: str,
         session_dir: Path,
         proxy_url: str | None = None,
     ):
@@ -183,16 +184,20 @@ class DeliveryClient:
         async for user in self.client.iter_participants(chat_id):
             if getattr(user, "bot", False) or getattr(user, "deleted", False):
                 continue
+            display_name = " ".join(
+                part for part in [getattr(user, "first_name", None), getattr(user, "last_name", None)] if part
+            ).strip() or getattr(user, "username", None)
             yield Recipient(
                 id=user.id,
                 kind="private",
                 username=getattr(user, "username", None),
                 days_since_last_message=0,
+                display_name=display_name,
             )
 
     async def count_recent_non_team_messages(
         self,
-        chat_id: "<REDACTED>"
+        chat_id: int,
         *,
         days: int,
         team_identifiers: list[str],
@@ -229,7 +234,34 @@ class DeliveryClient:
             count += 1
         return count
 
-    async def send_payload(self, recipient_id: int, payload: dict[str, Any]) -> None:
+    async def send_payload(self, recipient_id: int, payload: dict[str, Any]) -> int | None:
+        saved_message_id = payload.get("copy_from_saved_message_id")
+        if saved_message_id:
+            random_id = random.randrange(-2**63, 2**63)
+            result = await self.client(functions.messages.ForwardMessagesRequest(
+                from_peer=await self.client.get_input_entity("me"),
+                id=[int(saved_message_id)],
+                random_id=[random_id],
+                to_peer=await self.client.get_input_entity(recipient_id),
+                drop_author=True,
+                drop_media_captions=False,
+            ))
+            message_id = next((update.id for update in getattr(result, "updates", [])
+                               if isinstance(update, types.UpdateMessageID) and update.random_id == random_id), None)
+            if message_id is None:
+                # Never guess using the last message in a busy group.
+                messages = [update.message for update in getattr(result, "updates", [])
+                            if isinstance(update, (types.UpdateNewMessage, types.UpdateNewChannelMessage))
+                            and getattr(update.message, "out", False)
+                            and utils.get_peer_id(update.message.peer_id) == recipient_id]
+                if len(messages) == 1:
+                    message_id = messages[0].id
+            if message_id is None:
+                raise RuntimeError("Copied message id unavailable; manual review required")
+            append_after_copy = payload.get("append_after_copy")
+            if append_after_copy:
+                await self.client.send_message(recipient_id, append_after_copy, parse_mode="html")
+            return message_id
         text = payload.get("text")
         if text and len(payload) == 1:
             await self.client.send_message(recipient_id, text, parse_mode="html")
@@ -249,12 +281,15 @@ class DeliveryClient:
                         video_note=True,
                     )
                 elif media_type == "voice":
-                    await self.client.send_file(recipient_id, path, voice_note=True, caption=text or None)
+                    await self.client.send_file(recipient_id, path, voice_note=True, caption=text or None, parse_mode="html")
                 else:
-                    await self.client.send_file(recipient_id, path, caption=text or None)
+                    await self.client.send_file(recipient_id, path, caption=text or None, parse_mode="html")
                 text = None
         if text:
             await self.client.send_message(recipient_id, text, parse_mode="html")
+
+    async def pin_video(self, recipient_id: int, message_id: int) -> None:
+        await self.client.pin_message(recipient_id, message_id, notify=False)
 
     async def _folder_peer_filter(self, folder: str) -> FolderPeerFilter | None:
         try:

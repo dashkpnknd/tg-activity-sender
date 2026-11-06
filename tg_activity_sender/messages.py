@@ -23,7 +23,7 @@ class StoredMessage:
     def validate(self) -> None:
         if not self.payload:
             raise ValueError("Message payload cannot be empty")
-        allowed = SUPPORTED_MEDIA_KEYS | {"text"}
+        allowed = SUPPORTED_MEDIA_KEYS | {"text", "copy_from_saved_message_id", "append_after_copy"}
         unknown = set(self.payload) - allowed
         if unknown:
             raise ValueError(f"Unsupported message payload keys: {', '.join(sorted(unknown))}")

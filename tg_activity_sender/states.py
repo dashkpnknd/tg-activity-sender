@@ -11,6 +11,7 @@ class AccountStates(StatesGroup):
 
 
 class CampaignStates(StatesGroup):
+    waiting_localtraffic_video_post = State()
     waiting_name = State()
     waiting_chat_sequence = State()
     waiting_private_sequence = State()

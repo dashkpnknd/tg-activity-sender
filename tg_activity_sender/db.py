@@ -85,6 +85,7 @@ class Campaign(Base):
     include_private: Mapped[bool] = mapped_column(Boolean, default=True)
     schedule_window: Mapped[str] = mapped_column(String(32))
     delay_between_recipients_seconds: Mapped[int] = mapped_column(Integer)
+    delay_between_recipients_max_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[CampaignStatus] = mapped_column(String(32), default=CampaignStatus.DRAFT)
 
 
@@ -188,6 +189,8 @@ class Database:
             statements.append("ALTER TABLE campaigns ADD COLUMN avito_activity_days INTEGER DEFAULT 5")
         if "avito_client_names" not in columns:
             statements.append("ALTER TABLE campaigns ADD COLUMN avito_client_names JSON DEFAULT '[]'")
+        if "delay_between_recipients_max_seconds" not in columns:
+            statements.append("ALTER TABLE campaigns ADD COLUMN delay_between_recipients_max_seconds INTEGER")
         log_columns = set()
         if inspector.has_table("delivery_logs"):
             log_columns = {column["name"] for column in inspector.get_columns("delivery_logs")}

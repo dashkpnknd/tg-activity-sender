@@ -9,10 +9,10 @@ from dotenv import load_dotenv
 
 @dataclass(frozen=True)
 class Settings:
-    bot_token: "<REDACTED>"
+    bot_token: str
     telegram_api_id: int
     telegram_api_hash: str
-    admin_ids: "<REDACTED>"
+    admin_ids: frozenset[int]
     database_path: Path
     media_dir: Path
     session_dir: Path
@@ -26,16 +26,16 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         load_dotenv()
-        admin_ids = "<REDACTED>"
+        admin_ids = frozenset(
             int(item.strip())
             for item in os.getenv("ADMIN_IDS", "").split(",")
             if item.strip()
         )
         return cls(
-            bot_token="<REDACTED>"
+            bot_token=_required("BOT_TOKEN"),
             telegram_api_id=int(_required("TELEGRAM_API_ID")),
             telegram_api_hash=_required("TELEGRAM_API_HASH"),
-            admin_ids="<REDACTED>"
+            admin_ids=admin_ids,
             database_path=Path(os.getenv("DATABASE_PATH", "data/bot.sqlite3")),
             media_dir=Path(os.getenv("MEDIA_DIR", "data/media")),
             session_dir=Path(os.getenv("SESSION_DIR", "sessions")),

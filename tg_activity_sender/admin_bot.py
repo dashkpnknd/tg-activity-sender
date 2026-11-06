@@ -124,7 +124,7 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
     async def add_account_qr(callback: CallbackQuery, state: FSMContext) -> None:
         if not await guard(callback):
             return
-        token = "<REDACTED>"
+        token = uuid.uuid4().hex
         await callback.message.edit_text("Создаю QR для входа...")
         try:
             ticket = await account_manager.begin_qr_login(token)
@@ -165,7 +165,7 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
         if not await guard(message):
             return
         data = await state.get_data()
-        token = "<REDACTED>"
+        token = data.get("qr_token")
         if not token:
             await state.clear()
             await message.answer("Не нашёл активную QR-авторизацию. Начни добавление аккаунта заново.")
@@ -295,6 +295,80 @@ def build_dispatcher(db: Database, account_manager: AccountManager, *, admin_ids
             f"ЛС-цепочка: #{private_sequence.id}\n\n"
             "Добавь кружок вторым шагом в обе цепочки, потом запускай кампанию из списка.",
             reply_markup=back("campaigns"),
+        )
+
+    @router.callback_query(F.data == "campaign:prepare_localtraffic_video")
+    async def prepare_localtraffic_video(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await guard(callback):
+            return
+        if not db.find_account_by_username("localTraffic"):
+            await callback.answer("Сначала добавь аккаунт @LocalTraffic по QR.", show_alert=True)
+            return
+        await state.set_state(CampaignStates.waiting_localtraffic_video_post)
+        await callback.message.edit_text(
+            "Перешли сюда одним сообщением видео с готовой подписью.\n\n"
+            "Я сохраню ролик на сервере один раз и создам новую черновую кампанию от @LocalTraffic: "
+            "папка «Все клиенты», отправка только в чаты, с отметкой всех участников, кроме команды и ЧС. "
+            "Исходный отправитель в чатах не будет показан."
+        )
+
+    @router.message(F.video)
+    async def capture_localtraffic_video_post(message: Message, state: FSMContext) -> None:
+        if not await guard(message):
+            return
+        if not message.video:
+            await message.answer("Нужно переслать именно видео с подписью одним сообщением.")
+            return
+        try:
+            payload = await capture_message_payload(message, media_dir)
+        except asyncio.TimeoutError:
+            await message.answer("Не успел скачать видео на сервер. Перешли его ещё раз.")
+            return
+        except Exception as exc:
+            await message.answer(f"Не удалось сохранить видео: <code>{str(exc)[:500]}</code>", parse_mode=ParseMode.HTML)
+            return
+        if not payload.get("video"):
+            await message.answer("В пересланном сообщении не найден видеофайл. Перешли его ещё раз.")
+            return
+
+        suffix = uuid.uuid4().hex[:6]
+        sequence = db.create_sequence(f"LocalTraffic: VK видео {suffix}")
+        db.add_sequence_step(sequence.id, order=1, payload=payload, delay_after_seconds=0)
+        campaign = db.create_campaign(
+            name=f"LocalTraffic — VK видео {suffix}",
+            sequence_id=sequence.id,
+            chat_sequence_id=sequence.id,
+            private_sequence_id=sequence.id,
+            source_folder="Все клиенты",
+            source_account_username="LocalTraffic",
+            target_segment="all",
+            dedupe_key=f"localtraffic-vk-video-{suffix}",
+            team_identifiers=DEFAULT_TEAM_IDENTIFIERS,
+            segment_window_days=30,
+            segment_min_non_team_messages=5,
+            activity_mode=ActivityMode.BOTH,
+            days_threshold=0,
+            include_chats=True,
+            include_private=False,
+            schedule_window="08:00-21:00",
+            delay_between_recipients_seconds=300,
+        )
+        await state.clear()
+        await message.answer(
+            f"Видео сохранено, создана новая кампания #{campaign.id}.\n\n"
+            "• аккаунт: @LocalTraffic\n"
+            "• папка: Все клиенты\n"
+            "• получатели: только групповые чаты\n"
+            "• отметки: все участники, кроме команды и ЧС\n"
+            "• окно отправки: 08:00–21:00\n"
+            "• статус: черновик\n\n"
+            "Ролик не будет скачиваться повторно: он сохранён один раз на сервере и уйдёт от @LocalTraffic без имени исходного отправителя.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="▶ Запустить кампанию", callback_data=f"campaign:run:{campaign.id}")],
+                    [InlineKeyboardButton(text="К кампаниям", callback_data="campaign:list_all")],
+                ]
+            ),
         )
 
     @router.callback_query(F.data == "campaign:create")
@@ -594,7 +668,7 @@ async def capture_message_payload(message: Message, media_dir: Path) -> dict[str
     payload: dict[str, Any] = {}
     if message.html_text:
         payload["text"] = message.html_text
-    if message.caption:
+    elif message.caption:
         payload["text"] = message.caption
 
     media_fields = {
@@ -611,7 +685,7 @@ async def capture_message_payload(message: Message, media_dir: Path) -> dict[str
         if not file_id:
             continue
         destination = media_dir / f"{uuid.uuid4().hex}_{media_type}"
-        await asyncio.wait_for(message.bot.download(file_id, destination=destination), timeout=60)
+        await asyncio.wait_for(message.bot.download(file_id, destination=destination), timeout=600)
         payload.setdefault(media_type, []).append({"path": str(destination), "file_name": destination.name})
     if not payload:
         raise ValueError("Не удалось сохранить сообщение")
