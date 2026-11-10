@@ -62,3 +62,6 @@ Runtime data is intentionally ignored by Git:
 
 This tool is designed for existing/owned audiences. Keep conservative delays, maintain the blacklist, and do not use it to bypass Telegram limits.
 
+## Связи и границы проекта
+
+Кампании сообщений задаются отдельно: у каждой свои правила, аудитория и состояние. Новая кампания может использовать новый сценарий внутри этого бота и не становится отдельным репозиторием автоматически.
